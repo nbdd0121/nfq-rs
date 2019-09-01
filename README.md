@@ -13,12 +13,11 @@ libmnl directly, which is licensed under LGPL.
 
 Here is an example which accepts all packets.
 ```rust
-use libc;
 use nfq::{Queue, Verdict};
 
 fn main() -> std::io::Result<()> {
    let mut queue = Queue::open()?; 
-   queue.bind(libc::AF_INET, 0)?;
+   queue.bind_v4(0)?;
    loop {
        let msg = queue.recv()?;
        queue.verdict(msg, Verdict::Accept)?;

@@ -13,12 +13,11 @@
 //!
 //! Here is an example which accepts all packets.
 //! ```rust,ignore
-//! use libc;
 //! use nfq::{Queue, Verdict};
 //!
 //! fn main() -> std::io::Result<()> {
 //!    let mut queue = Queue::open()?; 
-//!    queue.bind(libc::AF_INET, 0)?;
+//!    queue.bind_v4(0)?;
 //!    loop {
 //!        let msg = queue.recv()?;
 //!        queue.verdict(msg, Verdict::Accept)?;
@@ -306,7 +305,7 @@ impl Queue {
     /// 
     /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
     /// indicate the capability of accepting offloaded packets.
-    pub fn bind(&mut self, pf: libc::c_int, queue_num: u16) -> Result<()> {
+    fn bind(&mut self, pf: libc::c_int, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0; 8192];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
@@ -339,8 +338,24 @@ impl Queue {
         }
     }
 
+    /// Bind to the specified iptables queue.
+    /// 
+    /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
+    /// indicate the capability of accepting offloaded packets.
+    pub fn bind_v4(&mut self, queue_num: u16) -> Result<()> {
+        self.bind(libc::AF_INET, queue_num)
+    }
+
+    /// Bind to the specified ip6tables queue.
+    /// 
+    /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
+    /// indicate the capability of accepting offloaded packets.
+    pub fn bind_v6(&mut self, queue_num: u16) -> Result<()> {
+        self.bind(libc::AF_INET6, queue_num)
+    }
+
     /// Unbind from a specific protocol and queue number.
-    pub fn unbind(&mut self, pf: libc::c_int, queue_num: u16) -> Result<()> {
+    fn unbind(&mut self, pf: libc::c_int, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0; 8192];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
@@ -356,6 +371,16 @@ impl Queue {
             );
             self.send_nlmsg(nlh)
         }
+    }
+
+    /// Unbind from the specified iptables queue.
+    pub fn unbind_v4(&mut self, queue_num: u16) -> Result<()> {
+        self.unbind(libc::AF_INET, queue_num)
+    }
+
+    /// Unbind from the specified ip6tables queue.
+    pub fn unbind_v6(&mut self, queue_num: u16) -> Result<()> {
+        self.unbind(libc::AF_INET6, queue_num)
     }
 
     /// Receive a packet from the queue.
