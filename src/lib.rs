@@ -185,6 +185,12 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         NFQA_IFINDEX_OUTDEV => message.outdev = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_IFINDEX_PHYSINDEV => message.physindev = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = be32_to_cpu(mnl_attr_get_u32(attr)),
+        NFQA_HWADDR => {
+            if mnl_attr_validate2(attr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hw>()) < 0 {
+                return mnl_sys::MNL_CB_ERROR
+            }
+            message.hwaddr = mnl_attr_get_payload(attr) as _;
+        }
         NFQA_CAP_LEN => message.orig_len = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_SKB_INFO => message.skbinfo = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_SECCTX => message.secctx = Some(std::ffi::CStr::from_ptr(mnl_attr_get_str(attr)).to_str().unwrap()),
