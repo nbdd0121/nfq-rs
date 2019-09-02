@@ -343,8 +343,50 @@ impl Queue {
                 std::mem::size_of::<nfqnl_msg_config_params>(),
                 &params as *const nfqnl_msg_config_params as _
             );
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, be32_to_cpu(NFQA_CFG_F_GSO));
+            self.send_nlmsg(nlh)
+        }
+    }
+
+    /// Set whether the kernel should drop or accept a packet if the queue is full.
+    pub fn set_fail_open(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
+        unsafe {
+            let mut buf = [0; 8192];
+            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_FAIL_OPEN) } else { 0 });
+            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_FAIL_OPEN));
+            self.send_nlmsg(nlh)
+        }
+    }
+
+    /// Set whether we should receive GSO-enabled and partial checksum packets.
+    pub fn set_recv_gso(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
+        unsafe {
+            let mut buf = [0; 8192];
+            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_GSO) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_GSO));
+            self.send_nlmsg(nlh)
+        }
+    }
+
+    /// Set whether we should receive UID/GID along with packets.
+    pub fn set_recv_uid_gid(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
+        unsafe {
+            let mut buf = [0; 8192];
+            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_UID_GID) } else { 0 });
+            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_UID_GID));
+            self.send_nlmsg(nlh)
+        }
+    }
+
+    /// Set whether we should receive security context strings along with packets.
+    pub fn set_recv_security_context(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
+        unsafe {
+            let mut buf = [0; 8192];
+            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_SECCTX) } else { 0 });
+            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_SECCTX));
             self.send_nlmsg(nlh)
         }
     }
