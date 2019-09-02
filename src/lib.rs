@@ -74,7 +74,7 @@ unsafe fn nfq_hdr_put(buf: &mut [u8], typ: u16, queue_num: u16) -> *mut nlmsghdr
 
 /// A network packet with associated metadata.
 pub struct Message {
-    /// This is here for lifetime requirements, but we're not using it directly.
+    // This is here for lifetime requirements, but we're not using it directly.
     #[allow(dead_code)]
     buffer: Arc<Vec<u8>>,
     nlh: *const nlmsghdr,
@@ -91,6 +91,8 @@ pub struct Message {
     timestamp: Option<SystemTime>,
     hwaddr: *const nfqnl_msg_packet_hw,
     hdr: *const nfqnl_msg_packet_hdr,
+    // conntrack data
+    ct: Option<Conntrack>,
     /// The actual lifetime is 'buffer
     payload: &'static [u8],
 }
@@ -173,6 +175,62 @@ impl Message {
     pub fn payload(&self) -> &[u8] {
         self.payload
     }
+
+    /// Get the associated conntrack information.
+    pub fn conntrack(&self) -> Option<&Conntrack> {
+        self.ct.as_ref()
+    }
+}
+
+/// Conntrack information associated with the message
+pub struct Conntrack {
+    state: u32,
+    id: u32,
+}
+
+pub mod conntrack {
+    #[derive(Debug)]
+    pub enum State {
+        Established,
+        Related,
+        New,
+        EstablishedReply,
+        RelatedReply,
+        NewReply,
+        #[doc(hidden)]
+        Invalid,
+    }
+}
+
+impl Conntrack {
+    /// Get the conntrack ID.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Get the connection state
+    pub fn state(&self) -> conntrack::State {
+        use conntrack::State;
+        match self.state {
+            IP_CT_ESTABLISHED => State::Established,
+            IP_CT_RELATED => State::Related,
+            IP_CT_NEW => State::New,
+            IP_CT_ESTABLISHED_REPLY => State::EstablishedReply,
+            IP_CT_RELATED_REPLY => State::RelatedReply,
+            IP_CT_NEW_REPLY => State::NewReply,
+            _ => State::Invalid,
+        }
+    }
+}
+
+unsafe extern "C" fn parse_ct_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
+    let ct = &mut *(data as *mut Conntrack);
+    let typ = mnl_attr_get_type(attr) as c_uint;
+    match typ {
+        CTA_ID => ct.id = be32_to_cpu(mnl_attr_get_u32(attr)),
+        _ => (),
+    }
+    return MNL_CB_OK;
 }
 
 unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
@@ -212,6 +270,16 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
             let payload = mnl_attr_get_payload(attr);
             message.payload = std::slice::from_raw_parts(payload as *const u8, len as usize);
         }
+        NFQA_CT => {
+            // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
+            // init should be good enough.
+            if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
+            return mnl_attr_parse_nested(attr, Some(parse_ct_attr), message.ct.as_mut().unwrap() as *mut Conntrack as _);
+        }
+        NFQA_CT_INFO => {
+            if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
+            message.ct.as_mut().unwrap().state = be32_to_cpu(mnl_attr_get_u32(attr));
+        }
         _ => (),
     }
     mnl_sys::MNL_CB_OK
@@ -235,6 +303,7 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         secctx: None,
         timestamp: None,
         hwaddr: std::ptr::null(),
+        ct: None,
         payload: &[],
     };
 
@@ -312,7 +381,7 @@ impl Queue {
     }
 
     /// Bind to a specific protocol and queue number.
-    /// 
+    ///
     /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
     /// indicate the capability of accepting offloaded packets.
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
@@ -386,6 +455,17 @@ impl Queue {
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_SECCTX) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_SECCTX));
+            self.send_nlmsg(nlh)
+        }
+    }
+
+    /// Set whether we should receive connteack information along with packets.
+    pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
+        unsafe {
+            let mut buf = [0; 8192];
+            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_CONNTRACK) } else { 0 });
+            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_CONNTRACK));
             self.send_nlmsg(nlh)
         }
     }
