@@ -17,7 +17,7 @@ use nfq::{Queue, Verdict};
 
 fn main() -> std::io::Result<()> {
    let mut queue = Queue::open()?; 
-   queue.bind_v4(0)?;
+   queue.bind(0)?;
    loop {
        let msg = queue.recv()?;
        queue.verdict(msg, Verdict::Accept)?;
