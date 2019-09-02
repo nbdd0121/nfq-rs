@@ -285,13 +285,24 @@ impl Queue {
         }
 
         queue.portid = unsafe { mnl_socket_get_portid(nl) };
-
-        // Turn off packet lost notification
-        let mut ret: c_int = 0;
-        unsafe { mnl_socket_setsockopt(nl, NETLINK_NO_ENOBUFS, &mut ret as *mut c_int as _, std::mem::size_of::<c_int>() as _) };
-        
+        queue.set_recv_enobufs(false)?;
         Ok(queue)
     }
+
+    /// Change whether ENOBUFS should be received by the application if the kenrel queue is full.
+    /// As user-space usually cannot do any special about this, `Queue::open()` will turn this off
+    /// by default.
+    pub fn set_recv_enobufs(&mut self, enable: bool) -> std::io::Result<()> {
+        let val = (!enable) as libc::c_int;
+        if unsafe { mnl_socket_setsockopt(
+                self.nl, NETLINK_NO_ENOBUFS,
+                &val as *const c_int as _, std::mem::size_of::<c_int>() as _
+        ) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
 
     unsafe fn send_nlmsg(&self, nlh: *mut nlmsghdr) -> std::io::Result<()> {
         if mnl_socket_sendto(self.nl, nlh as _, (*nlh).nlmsg_len as _) < 0 {
@@ -333,7 +344,7 @@ impl Queue {
                 &params as *const nfqnl_msg_config_params as _
             );
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, be32_to_cpu(NFQA_CFG_F_GSO));
-	        mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_GSO));
+            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_GSO));
             self.send_nlmsg(nlh)
         }
     }
