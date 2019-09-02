@@ -2,7 +2,7 @@
 //!
 //! `nfq` is Rust library for performing userspace handling of packets queued by the kernel packet
 //! packet filter chains.
-//! 
+//!
 //! # License
 //! In contrast to `libnetfilter_queue` which is licensed under GPL 2.0, which will require all
 //! binaries using that library to be bound by GPL, `nfq` is dual-licensed under MIT/Apache-2.0.
@@ -16,7 +16,7 @@
 //! use nfq::{Queue, Verdict};
 //!
 //! fn main() -> std::io::Result<()> {
-//!    let mut queue = Queue::open()?; 
+//!    let mut queue = Queue::open()?;
 //!    queue.bind(0)?;
 //!    loop {
 //!        let msg = queue.recv()?;
@@ -72,6 +72,12 @@ unsafe fn nfq_hdr_put(buf: &mut [u8], typ: u16, queue_num: u16) -> *mut nlmsghdr
     nlh
 }
 
+enum PayloadState {
+    Unmodified,
+    Modified,
+    Owned(Vec<u8>),
+}
+
 /// A network packet with associated metadata.
 pub struct Message {
     // This is here for lifetime requirements, but we're not using it directly.
@@ -93,8 +99,9 @@ pub struct Message {
     hdr: *const nfqnl_msg_packet_hdr,
     // conntrack data
     ct: Option<Conntrack>,
-    /// The actual lifetime is 'buffer
-    payload: &'static [u8],
+    // The actual lifetime is 'buffer
+    payload: &'static mut [u8],
+    payload_state: PayloadState,
 }
 
 unsafe impl Send for Message {}
@@ -141,13 +148,13 @@ impl Message {
     /// Get the security context string of the local process sending the packet. If not applicable,
     /// `None` is returned.
     pub fn security_context(&self) -> Option<&str> { self.secctx }
-    
+
     /// Get the UID of the local process sending the packet. If not applicable, `None` is returned.
     pub fn uid(&self) -> Option<u32> { self.uid }
 
     /// Get the GID of the local process sending the packet. If not applicable, `None` is returned.
     pub fn gid(&self) -> Option<u32> { self.gid }
-    
+
     /// Get the timestamp of the packet.
     pub fn timestamp(&self) -> Option<SystemTime> { self.timestamp }
 
@@ -173,7 +180,33 @@ impl Message {
 
     /// Get the content of the payload.
     pub fn payload(&self) -> &[u8] {
-        self.payload
+        match self.payload_state {
+            PayloadState::Unmodified |
+            PayloadState::Modified => self.payload,
+            PayloadState::Owned(ref vec) => &vec,
+        }
+    }
+
+    /// Get the content of the payload in mutable state. If the final verdict is not
+    /// `Verdict::Drop`, the change be committed to the kernel.
+    ///
+    /// *Note*: Once the method is called, the payload will be written back regardles whether
+    /// the underlying storage is actually modified, therefore it is not optimal performance-wise.
+    pub fn get_payload_mut(&mut self) -> &mut [u8] {
+        match self.payload_state {
+            PayloadState::Unmodified => {
+                self.payload_state = PayloadState::Modified;
+                self.payload
+            }
+            PayloadState::Modified => self.payload,
+            PayloadState::Owned(ref mut vec) => vec,
+        }
+    }
+
+    /// Set the content of the payload. If the final verdict is not `Verdict::Drop`, the updated
+    /// payload will be committed to the kernel.
+    pub fn set_payload(&mut self, payload: impl Into<Vec<u8>>) {
+        self.payload_state = PayloadState::Owned(payload.into());
     }
 
     /// Get the associated conntrack information.
@@ -268,7 +301,7 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         NFQA_PAYLOAD => {
             let len = mnl_attr_get_payload_len(attr);
             let payload = mnl_attr_get_payload(attr);
-            message.payload = std::slice::from_raw_parts(payload as *const u8, len as usize);
+            message.payload = std::slice::from_raw_parts_mut(payload as *const u8 as *mut u8, len as usize);
         }
         NFQA_CT => {
             // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
@@ -304,7 +337,8 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         timestamp: None,
         hwaddr: std::ptr::null(),
         ct: None,
-        payload: &[],
+        payload: &mut [],
+        payload_state: PayloadState::Unmodified,
     };
 
     if mnl_attr_parse(nlh, std::mem::size_of::<nfgenmsg>() as _, Some(parse_attr), &mut message as *mut Message as _) < 0 {
@@ -514,7 +548,7 @@ impl Queue {
     pub fn verdict_mark(&mut self, msg: Message, verdict: Verdict, mark: Option<u32>) -> Result<()> {
         unsafe {
             let nfg = mnl_nlmsg_get_payload(msg.nlh) as *mut nfgenmsg;
-            let mut buf = [0; 8192];
+            let mut buf = [0; 8192 + 0xffff];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_VERDICT as u16, be16_to_cpu((*nfg).res_id));
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match verdict {
@@ -529,6 +563,12 @@ impl Queue {
             mnl_sys::mnl_attr_put(nlh, NFQA_VERDICT_HDR as u16, std::mem::size_of::<nfqnl_msg_verdict_hdr>(), &vh as *const nfqnl_msg_verdict_hdr as _);
             if let Some(mark) = mark {
                 mnl_sys::mnl_attr_put_u32(nlh, NFQA_MARK as u16, be32_to_cpu(mark));
+            }
+            if let PayloadState::Unmodified = msg.payload_state {} else {
+                if let Verdict::Drop = verdict {} else {
+                    let payload = msg.payload();
+                    mnl_sys::mnl_attr_put(nlh, NFQA_PAYLOAD as u16, payload.len(), payload.as_ptr() as _);
+                }
             }
             self.send_nlmsg(nlh)
         }
