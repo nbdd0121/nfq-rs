@@ -47,7 +47,7 @@ fn be64_to_cpu(x: u64) -> u64 {
 }
 
 /// Decision made on a specific packet.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// Discard the packet
     Drop,
@@ -85,6 +85,7 @@ pub struct Message {
     buffer: Arc<Vec<u8>>,
     nlh: *const nlmsghdr,
     nfmark: u32,
+    nfmark_dirty: bool,
     indev: u32,
     outdev: u32,
     physindev: u32,
@@ -102,6 +103,7 @@ pub struct Message {
     // The actual lifetime is 'buffer
     payload: &'static mut [u8],
     payload_state: PayloadState,
+    verdict: Verdict,
 }
 
 unsafe impl Send for Message {}
@@ -109,6 +111,12 @@ unsafe impl Send for Message {}
 impl Message {
     /// Get the nfmark (fwmark) of the packet.
     pub fn nfmark(&self) -> u32 { self.nfmark }
+
+    /// Set the associated nfmark (fwmark) of the packet.
+    pub fn set_nfmark(&mut self, mark: u32) {
+        self.nfmark = mark;
+        self.nfmark_dirty = true;
+    }
 
     /// Get the interface index of the interface the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
@@ -207,6 +215,16 @@ impl Message {
     /// payload will be committed to the kernel.
     pub fn set_payload(&mut self, payload: impl Into<Vec<u8>>) {
         self.payload_state = PayloadState::Owned(payload.into());
+    }
+
+    /// Get the current verdict.
+    pub fn get_verdict(&self) -> Verdict {
+        self.verdict
+    }
+
+    /// Set the current verdict.
+    pub fn set_verdict(&mut self, verdict: Verdict) {
+        self.verdict = verdict;
     }
 
     /// Get the associated conntrack information.
@@ -325,6 +343,7 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         nlh,
         hdr: std::ptr::null(),
         nfmark: 0,
+        nfmark_dirty: false,
         indev: 0,
         outdev: 0,
         physindev: 0,
@@ -339,6 +358,7 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         ct: None,
         payload: &mut [],
         payload_state: PayloadState::Unmodified,
+        verdict: Verdict::Accept,
     };
 
     if mnl_attr_parse(nlh, std::mem::size_of::<nfgenmsg>() as _, Some(parse_attr), &mut message as *mut Message as _) < 0 {
@@ -544,8 +564,8 @@ impl Queue {
         Ok(msg)
     }
 
-    /// Verdict a message and give it a new nfmark.
-    pub fn verdict_mark(&mut self, msg: Message, verdict: Verdict, mark: Option<u32>) -> Result<()> {
+    /// Verdict a message.
+    pub fn verdict(&mut self, msg: Message) -> Result<()> {
         unsafe {
             let nfg = mnl_nlmsg_get_payload(msg.nlh) as *mut nfgenmsg;
             let mut buf = [0; 8192 + 0xffff];
@@ -561,22 +581,17 @@ impl Queue {
                 id: (*msg.hdr).packet_id,
             };
             mnl_sys::mnl_attr_put(nlh, NFQA_VERDICT_HDR as u16, std::mem::size_of::<nfqnl_msg_verdict_hdr>(), &vh as *const nfqnl_msg_verdict_hdr as _);
-            if let Some(mark) = mark {
-                mnl_sys::mnl_attr_put_u32(nlh, NFQA_MARK as u16, be32_to_cpu(mark));
+            if msg.nfmark_dirty {
+                mnl_sys::mnl_attr_put_u32(nlh, NFQA_MARK as u16, be32_to_cpu(msg.nfmark));
             }
             if let PayloadState::Unmodified = msg.payload_state {} else {
-                if let Verdict::Drop = verdict {} else {
+                if msg.verdict != Verdict::Drop {
                     let payload = msg.payload();
                     mnl_sys::mnl_attr_put(nlh, NFQA_PAYLOAD as u16, payload.len(), payload.as_ptr() as _);
                 }
             }
             self.send_nlmsg(nlh)
         }
-    }
-
-    /// Verdict a message.
-    pub fn verdict(&mut self, msg: Message, verdict: Verdict) -> Result<()> {
-        self.verdict_mark(msg, verdict, None)
     }
 }
 
