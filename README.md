@@ -19,8 +19,9 @@ fn main() -> std::io::Result<()> {
    let mut queue = Queue::open()?; 
    queue.bind(0)?;
    loop {
-       let msg = queue.recv()?;
-       queue.verdict(msg, Verdict::Accept)?;
+       let mut msg = queue.recv()?;
+       msg.set_verdict(Verdict::Accept);
+       queue.verdict(msg)?;
    }
    Ok(())
 }
