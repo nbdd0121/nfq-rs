@@ -92,11 +92,11 @@ pub struct Message {
     physoutdev: u32,
     orig_len: u32,
     skbinfo: u32,
-    secctx: Option<&'static str>,
+    secctx: *const libc::c_char,
     uid: Option<u32>,
     gid: Option<u32>,
-    timestamp: Option<SystemTime>,
-    hwaddr: *const nfqnl_msg_packet_hw,
+    timestamp: *const nlattr,
+    hwaddr: *const nlattr,
     hdr: *const nfqnl_msg_packet_hdr,
     // conntrack data
     ct: Option<Conntrack>,
@@ -110,9 +110,11 @@ unsafe impl Send for Message {}
 
 impl Message {
     /// Get the nfmark (fwmark) of the packet.
+    #[inline]
     pub fn get_nfmark(&self) -> u32 { self.nfmark }
 
     /// Set the associated nfmark (fwmark) of the packet.
+    #[inline]
     pub fn set_nfmark(&mut self, mark: u32) {
         self.nfmark = mark;
         self.nfmark_dirty = true;
@@ -121,72 +123,98 @@ impl Message {
     /// Get the interface index of the interface the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
+    #[inline]
     pub fn get_indev(&self) -> u32 { self.indev }
 
     /// Get the interface index of the bridge port the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
+    #[inline]
     pub fn get_physindev(&self) -> u32 { self.physindev }
 
     /// Get the interface index of the interface the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
+    #[inline]
     pub fn get_outdev(&self) -> u32 { self.outdev }
 
     /// Get the interface index of the bridge port the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
+    #[inline]
     pub fn get_physoutdev(&self) -> u32 { self.physoutdev }
 
     /// Get the original length of the packet.
+    #[inline]
     pub fn get_original_len(&self) -> usize {
         if self.orig_len == 0 { self.payload.len() } else { self.orig_len as usize }
     }
 
     /// Check if the packet is GSO-offloaded.
+    #[inline]
     pub fn is_seg_offloaded(&self) -> bool {
         self.skbinfo & NFQA_SKB_GSO != 0
     }
 
     /// Check if the checksums are ready, e.g. due to offload.
+    #[inline]
     pub fn is_checksum_ready(&self) -> bool {
         self.skbinfo & NFQA_SKB_CSUMNOTREADY == 0
     }
 
     /// Get the security context string of the local process sending the packet. If not applicable,
     /// `None` is returned.
-    pub fn get_security_context(&self) -> Option<&str> { self.secctx }
+    pub fn get_security_context(&self) -> Option<&str> {
+        if self.secctx.is_null() { return None }
+        unsafe { std::ffi::CStr::from_ptr(self.secctx).to_str().ok() }
+    }
 
     /// Get the UID of the local process sending the packet. If not applicable, `None` is returned.
+    #[inline]
     pub fn get_uid(&self) -> Option<u32> { self.uid }
 
     /// Get the GID of the local process sending the packet. If not applicable, `None` is returned.
+    #[inline]
     pub fn get_gid(&self) -> Option<u32> { self.gid }
 
     /// Get the timestamp of the packet.
-    pub fn get_timestamp(&self) -> Option<SystemTime> { self.timestamp }
+    pub fn get_timestamp(&self) -> Option<SystemTime> {
+        if self.timestamp.is_null() { return None }
+        unsafe {
+            if mnl_attr_validate2(self.timestamp, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_timestamp>()) < 0 { return None }
+            let timeval = mnl_attr_get_payload(self.timestamp) as *const nfqnl_msg_packet_timestamp;
+            let duration = Duration::from_secs(be64_to_cpu((*timeval).sec)) +
+                Duration::from_micros(be64_to_cpu((*timeval).usec));
+            Some(SystemTime::UNIX_EPOCH + duration)
+        }
+    }
 
     /// Get the hardware address associated with the packet. For Ethernet packets, the hardware
     /// address returned will be the MAC address of the packet source host, if any.
     pub fn get_hw_addr(&self) -> Option<&[u8]> {
         if self.hwaddr.is_null() { return None }
         unsafe {
-            let len = be16_to_cpu((*self.hwaddr).hw_addrlen) as usize;
-            Some(&(*self.hwaddr).hw_addr[..len])
+            if mnl_attr_validate2(self.hwaddr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hw>()) < 0 { return None }
+            let hwaddr = mnl_attr_get_payload(self.hwaddr) as *const nfqnl_msg_packet_hw;
+            let len = be16_to_cpu((*hwaddr).hw_addrlen) as usize;
+            Some(&(*hwaddr).hw_addr[..len])
         }
     }
 
     /// Get the link layer protocol number, e.g. the EtherType field on Ethernet links.
+    #[inline]
     pub fn get_hw_protocol(&self) -> u16 {
         be16_to_cpu(unsafe { (*self.hdr).hw_protocol })
     }
 
     /// Get the netfilter hook number that handles this packet.
+    #[inline]
     pub fn get_hook(&self) -> u8 {
         unsafe { (*self.hdr).hook }
     }
 
     /// Get the content of the payload.
+    #[inline]
     pub fn get_payload(&self) -> &[u8] {
         match self.payload_state {
             PayloadState::Unmodified |
@@ -200,6 +228,7 @@ impl Message {
     ///
     /// *Note*: Once the method is called, the payload will be written back regardles whether
     /// the underlying storage is actually modified, therefore it is not optimal performance-wise.
+    #[inline]
     pub fn get_payload_mut(&mut self) -> &mut [u8] {
         match self.payload_state {
             PayloadState::Unmodified => {
@@ -213,21 +242,25 @@ impl Message {
 
     /// Set the content of the payload. If the final verdict is not `Verdict::Drop`, the updated
     /// payload will be committed to the kernel.
+    #[inline]
     pub fn set_payload(&mut self, payload: impl Into<Vec<u8>>) {
         self.payload_state = PayloadState::Owned(payload.into());
     }
 
     /// Get the current verdict.
+    #[inline]
     pub fn get_verdict(&self) -> Verdict {
         self.verdict
     }
 
     /// Set the current verdict.
+    #[inline]
     pub fn set_verdict(&mut self, verdict: Verdict) {
         self.verdict = verdict;
     }
 
     /// Get the associated conntrack information.
+    #[inline]
     pub fn get_conntrack(&self) -> Option<&Conntrack> {
         self.ct.as_ref()
     }
@@ -255,11 +288,13 @@ pub mod conntrack {
 
 impl Conntrack {
     /// Get the conntrack ID.
+    #[inline]
     pub fn get_id(&self) -> u32 {
         self.id
     }
 
     /// Get the connection state
+    #[inline]
     pub fn get_state(&self) -> conntrack::State {
         use conntrack::State;
         match self.state {
@@ -293,23 +328,13 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         NFQA_IFINDEX_OUTDEV => message.outdev = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_IFINDEX_PHYSINDEV => message.physindev = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_HWADDR => {
-            if mnl_attr_validate2(attr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hw>()) < 0 {
-                return mnl_sys::MNL_CB_ERROR
-            }
-            message.hwaddr = mnl_attr_get_payload(attr) as _;
-        }
+        NFQA_HWADDR => message.hwaddr = attr,
         NFQA_CAP_LEN => message.orig_len = be32_to_cpu(mnl_attr_get_u32(attr)),
         NFQA_SKB_INFO => message.skbinfo = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_SECCTX => message.secctx = Some(std::ffi::CStr::from_ptr(mnl_attr_get_str(attr)).to_str().unwrap()),
+        NFQA_SECCTX => message.secctx = mnl_attr_get_str(attr),
         NFQA_UID => message.uid = Some(be32_to_cpu(mnl_attr_get_u32(attr))),
         NFQA_GID => message.gid = Some(be32_to_cpu(mnl_attr_get_u32(attr))),
-        NFQA_TIMESTAMP => {
-            let timeval = mnl_attr_get_payload(attr) as *const nfqnl_msg_packet_timestamp;
-            let duration = Duration::from_secs(be64_to_cpu((*timeval).sec)) +
-                Duration::from_micros(be64_to_cpu((*timeval).usec));
-            message.timestamp = Some(SystemTime::UNIX_EPOCH + duration);
-        }
+        NFQA_TIMESTAMP => message.timestamp = attr,
         NFQA_PACKET_HDR => {
             if mnl_attr_validate2(attr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hdr>()) < 0 {
                 return mnl_sys::MNL_CB_ERROR
@@ -352,8 +377,8 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         skbinfo: 0,
         uid: None,
         gid: None,
-        secctx: None,
-        timestamp: None,
+        secctx: std::ptr::null(),
+        timestamp: std::ptr::null(),
         hwaddr: std::ptr::null(),
         ct: None,
         payload: &mut [],
