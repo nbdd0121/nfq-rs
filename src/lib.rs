@@ -110,7 +110,7 @@ unsafe impl Send for Message {}
 
 impl Message {
     /// Get the nfmark (fwmark) of the packet.
-    pub fn nfmark(&self) -> u32 { self.nfmark }
+    pub fn get_nfmark(&self) -> u32 { self.nfmark }
 
     /// Set the associated nfmark (fwmark) of the packet.
     pub fn set_nfmark(&mut self, mark: u32) {
@@ -121,54 +121,54 @@ impl Message {
     /// Get the interface index of the interface the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
-    pub fn indev(&self) -> u32 { self.indev }
+    pub fn get_indev(&self) -> u32 { self.indev }
 
     /// Get the interface index of the bridge port the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
-    pub fn physindev(&self) -> u32 { self.physindev }
+    pub fn get_physindev(&self) -> u32 { self.physindev }
 
     /// Get the interface index of the interface the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
-    pub fn outdev(&self) -> u32 { self.outdev }
+    pub fn get_outdev(&self) -> u32 { self.outdev }
 
     /// Get the interface index of the bridge port the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
-    pub fn physoutdev(&self) -> u32 { self.physoutdev }
+    pub fn get_physoutdev(&self) -> u32 { self.physoutdev }
 
     /// Get the original length of the packet.
-    pub fn original_len(&self) -> usize {
+    pub fn get_original_len(&self) -> usize {
         if self.orig_len == 0 { self.payload.len() } else { self.orig_len as usize }
     }
 
     /// Check if the packet is GSO-offloaded.
-    pub fn seg_offload(&self) -> bool {
+    pub fn is_seg_offloaded(&self) -> bool {
         self.skbinfo & NFQA_SKB_GSO != 0
     }
 
     /// Check if the checksums are ready, e.g. due to offload.
-    pub fn csum_ready(&self) -> bool {
+    pub fn is_checksum_ready(&self) -> bool {
         self.skbinfo & NFQA_SKB_CSUMNOTREADY == 0
     }
 
     /// Get the security context string of the local process sending the packet. If not applicable,
     /// `None` is returned.
-    pub fn security_context(&self) -> Option<&str> { self.secctx }
+    pub fn get_security_context(&self) -> Option<&str> { self.secctx }
 
     /// Get the UID of the local process sending the packet. If not applicable, `None` is returned.
-    pub fn uid(&self) -> Option<u32> { self.uid }
+    pub fn get_uid(&self) -> Option<u32> { self.uid }
 
     /// Get the GID of the local process sending the packet. If not applicable, `None` is returned.
-    pub fn gid(&self) -> Option<u32> { self.gid }
+    pub fn get_gid(&self) -> Option<u32> { self.gid }
 
     /// Get the timestamp of the packet.
-    pub fn timestamp(&self) -> Option<SystemTime> { self.timestamp }
+    pub fn get_timestamp(&self) -> Option<SystemTime> { self.timestamp }
 
     /// Get the hardware address associated with the packet. For Ethernet packets, the hardware
     /// address returned will be the MAC address of the packet source host, if any.
-    pub fn hw_addr(&self) -> Option<&[u8]> {
+    pub fn get_hw_addr(&self) -> Option<&[u8]> {
         if self.hwaddr.is_null() { return None }
         unsafe {
             let len = be16_to_cpu((*self.hwaddr).hw_addrlen) as usize;
@@ -177,17 +177,17 @@ impl Message {
     }
 
     /// Get the link layer protocol number, e.g. the EtherType field on Ethernet links.
-    pub fn hw_protocol(&self) -> u16 {
+    pub fn get_hw_protocol(&self) -> u16 {
         be16_to_cpu(unsafe { (*self.hdr).hw_protocol })
     }
 
     /// Get the netfilter hook number that handles this packet.
-    pub fn hook(&self) -> u8 {
+    pub fn get_hook(&self) -> u8 {
         unsafe { (*self.hdr).hook }
     }
 
     /// Get the content of the payload.
-    pub fn payload(&self) -> &[u8] {
+    pub fn get_payload(&self) -> &[u8] {
         match self.payload_state {
             PayloadState::Unmodified |
             PayloadState::Modified => self.payload,
@@ -228,7 +228,7 @@ impl Message {
     }
 
     /// Get the associated conntrack information.
-    pub fn conntrack(&self) -> Option<&Conntrack> {
+    pub fn get_conntrack(&self) -> Option<&Conntrack> {
         self.ct.as_ref()
     }
 }
@@ -255,12 +255,12 @@ pub mod conntrack {
 
 impl Conntrack {
     /// Get the conntrack ID.
-    pub fn id(&self) -> u32 {
+    pub fn get_id(&self) -> u32 {
         self.id
     }
 
     /// Get the connection state
-    pub fn state(&self) -> conntrack::State {
+    pub fn get_state(&self) -> conntrack::State {
         use conntrack::State;
         match self.state {
             IP_CT_ESTABLISHED => State::Established,
@@ -426,7 +426,6 @@ impl Queue {
         Ok(())
     }
 
-
     unsafe fn send_nlmsg(&self, nlh: *mut nlmsghdr) -> std::io::Result<()> {
         if mnl_socket_sendto(self.nl, nlh as _, (*nlh).nlmsg_len as _) < 0 {
             return Err(std::io::Error::last_os_error());
@@ -571,7 +570,7 @@ impl Queue {
             let mut buf = [0; 8192 + 0xffff];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_VERDICT as u16, be16_to_cpu((*nfg).res_id));
             let vh = nfqnl_msg_verdict_hdr {
-                verdict: be32_to_cpu(match verdict {
+                verdict: be32_to_cpu(match msg.verdict {
                     Verdict::Drop => 0,
                     Verdict::Accept => 1,
                     Verdict::Queue(num) => (num as u32) << 16 | 3,
@@ -586,7 +585,7 @@ impl Queue {
             }
             if let PayloadState::Unmodified = msg.payload_state {} else {
                 if msg.verdict != Verdict::Drop {
-                    let payload = msg.payload();
+                    let payload = msg.get_payload();
                     mnl_sys::mnl_attr_put(nlh, NFQA_PAYLOAD as u16, payload.len(), payload.as_ptr() as _);
                 }
             }
