@@ -423,7 +423,7 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
 /// A NetFilter queue.
 pub struct Queue {
     /// NetLink socket
-    nl: *mut mnl_sys::mnl_socket,
+    fd: libc::c_int,
     portid: libc::c_uint,
     /// In order to support out-of-order verdict and batch recv, we need to carefully manage the
     /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
@@ -440,23 +440,30 @@ unsafe impl Send for Queue {}
 impl Queue {
     /// Open a NetFilter socket and queue connection.
     pub fn open() -> std::io::Result<Queue> {
-        let nl = unsafe { mnl_socket_open(NETLINK_NETFILTER) };
-        if nl.is_null() {
+        let fd = unsafe { socket(PF_NETLINK, SOCK_RAW, NETLINK_NETFILTER) };
+        if fd == -1 {
             return Err(std::io::Error::last_os_error());
         }
 
         let mut queue = Queue {
-            nl,
+            fd,
             portid: 0,
             buffer: Arc::new(Vec::with_capacity(8192 + 0xffff)),
             queue: VecDeque::new(),
         };
 
-        if unsafe { mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) } < 0 {
+        let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
+        addr.nl_family = AF_NETLINK as _;
+        if unsafe { bind(fd, &addr as *const sockaddr_nl as _, std::mem::size_of_val(&addr) as _) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
 
-        queue.portid = unsafe { mnl_socket_get_portid(nl) };
+        let mut len = std::mem::size_of_val(&addr) as _;
+        if unsafe { getsockname(fd, &mut addr as *mut sockaddr_nl as _, &mut len) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        queue.portid = addr.nl_pid;
         queue.set_recv_enobufs(false)?;
         Ok(queue)
     }
@@ -465,10 +472,10 @@ impl Queue {
     /// As user-space usually cannot do any special about this, `Queue::open()` will turn this off
     /// by default.
     pub fn set_recv_enobufs(&mut self, enable: bool) -> std::io::Result<()> {
-        let val = (!enable) as libc::c_int;
-        if unsafe { mnl_socket_setsockopt(
-                self.nl, NETLINK_NO_ENOBUFS,
-                &val as *const c_int as _, std::mem::size_of::<c_int>() as _
+        let val = (!enable) as c_int;
+        if unsafe { setsockopt(
+                self.fd, SOL_NETLINK, NETLINK_NO_ENOBUFS,
+                &val as *const c_int as _, std::mem::size_of_val(&val) as _
         ) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -476,7 +483,13 @@ impl Queue {
     }
 
     unsafe fn send_nlmsg(&self, nlh: *mut nlmsghdr) -> std::io::Result<()> {
-        if mnl_socket_sendto(self.nl, nlh as _, (*nlh).nlmsg_len as _) < 0 {
+        let mut addr: sockaddr_nl = std::mem::zeroed();
+        addr.nl_family = AF_NETLINK as _;
+        if sendto(
+            self.fd,
+            nlh as _, (*nlh).nlmsg_len as _, 0,
+            &addr as *const sockaddr_nl as _, std::mem::size_of_val(&addr) as _
+        ) < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -598,9 +611,15 @@ impl Queue {
             let buf = Arc::make_mut(&mut self.buffer);
             let buf_size = buf.capacity();
             unsafe { buf.set_len(buf_size) }
-            let size = unsafe { mnl_socket_recvfrom(self.nl, buf.as_mut_ptr() as _, buf_size) };
-            if size == -1 {
+
+            let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size, MSG_TRUNC) };
+            if size < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+
+            // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
+            if size as usize > buf_size {
+                return Err(std::io::Error::from_raw_os_error(ENOSPC));
             }
 
             if unsafe { mnl_cb_run(buf.as_mut_ptr() as _, size as usize, 0, self.portid, Some(queue_cb), self as *mut Queue as _) } < 0 {
@@ -645,6 +664,6 @@ impl Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        unsafe { mnl_sys::mnl_socket_close(self.nl) };
+        unsafe { close(self.fd) };
     }
 }
