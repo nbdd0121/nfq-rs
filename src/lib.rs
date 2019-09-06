@@ -165,7 +165,7 @@ enum PayloadState {
 pub struct Message {
     // This is here for lifetime requirements, but we're not using it directly.
     #[allow(dead_code)]
-    buffer: Arc<Vec<u8>>,
+    buffer: Arc<Vec<u32>>,
     id: u16,
     nfmark: u32,
     nfmark_dirty: bool,
@@ -490,7 +490,7 @@ pub struct Queue {
     /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
     /// We use Arc for this case, and keep an extra copy here, so that if all messages are handled
     /// before call to `recv`, we can re-use the buffer.
-    buffer: Arc<Vec<u8>>,
+    buffer: Arc<Vec<u32>>,
     /// We can receive multiple messages from kernel in a single recv, so we keep a queue
     /// internally before everything is consumed.
     queue: VecDeque<Message>,
@@ -509,7 +509,7 @@ impl Queue {
         let mut queue = Queue {
             fd,
             portid: 0,
-            buffer: Arc::new(Vec::with_capacity(8192 + 0xffff)),
+            buffer: Arc::new(Vec::with_capacity((8192 + 0x10000) / 4)),
             queue: VecDeque::new(),
         };
 
