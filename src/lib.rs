@@ -94,6 +94,30 @@ mod nla {
     }
 }
 
+struct AttrStream<'a> {
+    buf: &'a [u32],
+}
+
+impl<'a> Iterator for AttrStream<'a> {
+    type Item = *const nlattr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let buf_left = self.buf.len() * 4;
+
+        // Not enough space for an attribute header
+        if buf_left < std::mem::size_of::<libc::nlattr>() { return None }
+
+        let attr = self.buf.as_ptr() as *const nlattr;
+        let nla_len = unsafe { (*attr).nla_len } as usize;
+
+        // Make sure there are enough space for the entire attribute
+        assert!(buf_left >= nla_len, "truncated attribute {} < {}", buf_left, nla_len);
+
+        self.buf = &self.buf[(nla_len + 3) / 4 ..];
+        Some(attr)
+    }
+}
+
 struct Nlmsg<'a> {
     buf: &'a mut [u32],
     len: usize,
@@ -388,18 +412,15 @@ impl Conntrack {
     }
 }
 
-unsafe extern "C" fn parse_ct_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
-    let ct = &mut *(data as *mut Conntrack);
+unsafe fn parse_ct_attr(attr: *const nlattr, ct: &mut Conntrack) {
     let typ = nla::get_type(attr) as c_uint;
     match typ {
         CTA_ID => ct.id = nla::get_u32(attr),
         _ => (),
     }
-    return MNL_CB_OK;
 }
 
-unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
-    let message = &mut *(data as *mut Message);
+unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
     let typ = nla::get_type(attr) as c_uint;
     match typ {
         NFQA_MARK => message.nfmark = nla::get_u32(attr),
@@ -408,7 +429,7 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         NFQA_IFINDEX_PHYSINDEV => message.physindev = nla::get_u32(attr),
         NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = nla::get_u32(attr),
         NFQA_HWADDR => {
-            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_hw>() { return mnl_sys::MNL_CB_ERROR }
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_hw>());
             message.hwaddr = nla::get_payload(attr);
         }
         NFQA_CAP_LEN => message.orig_len = nla::get_u32(attr),
@@ -417,11 +438,11 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         NFQA_UID => message.uid = Some(nla::get_u32(attr)),
         NFQA_GID => message.gid = Some(nla::get_u32(attr)),
         NFQA_TIMESTAMP => {
-            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_timestamp>() { return mnl_sys::MNL_CB_ERROR }
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_timestamp>());
             message.timestamp = nla::get_payload(attr);
         }
         NFQA_PACKET_HDR => {
-            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_hdr>() { return mnl_sys::MNL_CB_ERROR }
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_hdr>());
             message.hdr = nla::get_payload(attr);
         }
         NFQA_PAYLOAD => {
@@ -435,7 +456,10 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
             // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
             // init should be good enough.
             if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
-            return mnl_attr_parse_nested(attr, Some(parse_ct_attr), message.ct.as_mut().unwrap() as *mut Conntrack as _);
+            let ct = message.ct.as_mut().unwrap();
+            for attr in (AttrStream { buf: std::slice::from_raw_parts(nla::get_payload(attr), (nla::get_payload_len(attr) + 3) / 4) }) {
+                parse_ct_attr(attr, ct);
+            }
         }
         NFQA_CT_INFO => {
             if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
@@ -443,14 +467,19 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         }
         _ => (),
     }
-    mnl_sys::MNL_CB_OK
 }
 
 unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int {
+    const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
+    const NFGEN_HDRLEN: usize = (std::mem::size_of::<nfgenmsg>() + 3) &! 3;
+    let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const nfgenmsg;
+    let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
+    let attr_len = (*nlh).nlmsg_len as usize - NLMSG_HDRLEN - NFGEN_HDRLEN;
+
     let queue = &mut *(data as *mut Queue);
     let mut message = Message {
         buffer: Arc::clone(&queue.buffer),
-        id: (*(mnl_nlmsg_get_payload(nlh) as *mut nfgenmsg)).res_id,
+        id: (*nfgenmsg).res_id,
         hdr: std::ptr::null(),
         nfmark: 0,
         nfmark_dirty: false,
@@ -471,8 +500,8 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
         verdict: Verdict::Accept,
     };
 
-    if mnl_attr_parse(nlh, std::mem::size_of::<nfgenmsg>() as _, Some(parse_attr), &mut message as *mut Message as _) < 0 {
-        return MNL_CB_ERROR;
+    for attr in (AttrStream { buf: std::slice::from_raw_parts(attr_start, (attr_len + 3) / 4) }) {
+        parse_attr(attr, &mut message);
     }
 
     assert!(!message.hdr.is_null());
