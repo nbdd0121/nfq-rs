@@ -693,7 +693,8 @@ impl Queue {
     /// Verdict a message.
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
         unsafe {
-            let mut buf = [0u32; (8192 + 0x10000) / 4];
+            // Performance is critical here: use uninitialized to avoid zeroing the memory.
+            let mut buf: [u32; (8192 + 0x10000) / 4] = std::mem::uninitialized();
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id));
             let vh = nfqnl_msg_verdict_hdr {
