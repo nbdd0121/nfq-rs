@@ -73,6 +73,27 @@ unsafe fn nfq_hdr_put(buf: &mut [u32], typ: u16, queue_num: u16) -> *mut nlmsghd
     nlh
 }
 
+/// Helper functions for parsing `nlattr`. We do this ourselves instead of using libmnl to avoid
+/// unnecessary function calls.
+mod nla {
+    #[inline]
+    pub unsafe fn get_type(attr: *const libc::nlattr) -> u16 { (*attr).nla_type & (libc::NLA_TYPE_MASK as u16) }
+    #[inline]
+    pub unsafe fn get_payload_len(attr: *const libc::nlattr) -> usize {
+        (*attr).nla_len as usize - std::mem::size_of::<libc::nlattr>()
+    }
+    /// Returned value is only 32-bit aligned.
+    #[inline]
+    pub unsafe fn get_payload<T>(attr: *const libc::nlattr) -> *const T {
+        (attr as usize + std::mem::size_of::<libc::nlattr>()) as _
+    }
+    /// Get u32 from payload and convert it to native endian
+    #[inline]
+    pub unsafe fn get_u32(attr: *const libc::nlattr) -> u32 {
+        super::be32_to_cpu(*get_payload(attr))
+    }
+}
+
 enum PayloadState {
     Unmodified,
     Modified,
@@ -96,8 +117,8 @@ pub struct Message {
     secctx: *const libc::c_char,
     uid: Option<u32>,
     gid: Option<u32>,
-    timestamp: *const nlattr,
-    hwaddr: *const nlattr,
+    timestamp: *const nfqnl_msg_packet_timestamp,
+    hwaddr: *const nfqnl_msg_packet_hw,
     hdr: *const nfqnl_msg_packet_hdr,
     // conntrack data
     ct: Option<Conntrack>,
@@ -182,10 +203,8 @@ impl Message {
     pub fn get_timestamp(&self) -> Option<SystemTime> {
         if self.timestamp.is_null() { return None }
         unsafe {
-            if mnl_attr_validate2(self.timestamp, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_timestamp>()) < 0 { return None }
-            let timeval = mnl_attr_get_payload(self.timestamp) as *const nfqnl_msg_packet_timestamp;
-            let duration = Duration::from_secs(be64_to_cpu((*timeval).sec)) +
-                Duration::from_micros(be64_to_cpu((*timeval).usec));
+            let duration = Duration::from_secs(be64_to_cpu((*self.timestamp).sec)) +
+                Duration::from_micros(be64_to_cpu((*self.timestamp).usec));
             Some(SystemTime::UNIX_EPOCH + duration)
         }
     }
@@ -195,10 +214,8 @@ impl Message {
     pub fn get_hw_addr(&self) -> Option<&[u8]> {
         if self.hwaddr.is_null() { return None }
         unsafe {
-            if mnl_attr_validate2(self.hwaddr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hw>()) < 0 { return None }
-            let hwaddr = mnl_attr_get_payload(self.hwaddr) as *const nfqnl_msg_packet_hw;
-            let len = be16_to_cpu((*hwaddr).hw_addrlen) as usize;
-            Some(&(*hwaddr).hw_addr[..len])
+            let len = be16_to_cpu((*self.hwaddr).hw_addrlen) as usize;
+            Some(&(*self.hwaddr).hw_addr[..len])
         }
     }
 
@@ -312,9 +329,9 @@ impl Conntrack {
 
 unsafe extern "C" fn parse_ct_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
     let ct = &mut *(data as *mut Conntrack);
-    let typ = mnl_attr_get_type(attr) as c_uint;
+    let typ = nla::get_type(attr) as c_uint;
     match typ {
-        CTA_ID => ct.id = be32_to_cpu(mnl_attr_get_u32(attr)),
+        CTA_ID => ct.id = nla::get_u32(attr),
         _ => (),
     }
     return MNL_CB_OK;
@@ -322,29 +339,35 @@ unsafe extern "C" fn parse_ct_attr(attr: *const nlattr, data: *mut c_void) -> c_
 
 unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int {
     let message = &mut *(data as *mut Message);
-    let typ = mnl_attr_get_type(attr) as c_uint;
+    let typ = nla::get_type(attr) as c_uint;
     match typ {
-        NFQA_MARK => message.nfmark = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_IFINDEX_INDEV => message.indev = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_IFINDEX_OUTDEV => message.outdev = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_IFINDEX_PHYSINDEV => message.physindev = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_HWADDR => message.hwaddr = attr,
-        NFQA_CAP_LEN => message.orig_len = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_SKB_INFO => message.skbinfo = be32_to_cpu(mnl_attr_get_u32(attr)),
-        NFQA_SECCTX => message.secctx = mnl_attr_get_str(attr),
-        NFQA_UID => message.uid = Some(be32_to_cpu(mnl_attr_get_u32(attr))),
-        NFQA_GID => message.gid = Some(be32_to_cpu(mnl_attr_get_u32(attr))),
-        NFQA_TIMESTAMP => message.timestamp = attr,
+        NFQA_MARK => message.nfmark = nla::get_u32(attr),
+        NFQA_IFINDEX_INDEV => message.indev = nla::get_u32(attr),
+        NFQA_IFINDEX_OUTDEV => message.outdev = nla::get_u32(attr),
+        NFQA_IFINDEX_PHYSINDEV => message.physindev = nla::get_u32(attr),
+        NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = nla::get_u32(attr),
+        NFQA_HWADDR => {
+            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_hw>() { return mnl_sys::MNL_CB_ERROR }
+            message.hwaddr = nla::get_payload(attr);
+        }
+        NFQA_CAP_LEN => message.orig_len = nla::get_u32(attr),
+        NFQA_SKB_INFO => message.skbinfo = nla::get_u32(attr),
+        NFQA_SECCTX => message.secctx = nla::get_payload(attr),
+        NFQA_UID => message.uid = Some(nla::get_u32(attr)),
+        NFQA_GID => message.gid = Some(nla::get_u32(attr)),
+        NFQA_TIMESTAMP => {
+            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_timestamp>() { return mnl_sys::MNL_CB_ERROR }
+            message.timestamp = nla::get_payload(attr);
+        }
         NFQA_PACKET_HDR => {
-            if mnl_attr_validate2(attr, MNL_TYPE_UNSPEC, std::mem::size_of::<nfqnl_msg_packet_hdr>()) < 0 {
-                return mnl_sys::MNL_CB_ERROR
-            }
-            message.hdr = mnl_attr_get_payload(attr) as _;
+            if nla::get_payload_len(attr) < std::mem::size_of::<nfqnl_msg_packet_hdr>() { return mnl_sys::MNL_CB_ERROR }
+            message.hdr = nla::get_payload(attr);
         }
         NFQA_PAYLOAD => {
-            let len = mnl_attr_get_payload_len(attr);
-            let payload = mnl_attr_get_payload(attr);
+            let len = nla::get_payload_len(attr);
+            // We actually own this message (even though the buffer is shared via a Arc, we know
+            // that no other messages are overlapping, so it's safe to mutate it)
+            let payload = nla::get_payload::<u8>(attr) as *mut u8;
             message.payload = std::slice::from_raw_parts_mut(payload as *const u8 as *mut u8, len as usize);
         }
         NFQA_CT => {
@@ -355,7 +378,7 @@ unsafe extern "C" fn parse_attr(attr: *const nlattr, data: *mut c_void) -> c_int
         }
         NFQA_CT_INFO => {
             if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
-            message.ct.as_mut().unwrap().state = be32_to_cpu(mnl_attr_get_u32(attr));
+            message.ct.as_mut().unwrap().state = nla::get_u32(attr);
         }
         _ => (),
     }
