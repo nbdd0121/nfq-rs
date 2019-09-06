@@ -62,7 +62,7 @@ pub enum Verdict {
     Stop,
 }
 
-unsafe fn nfq_hdr_put(buf: &mut [u8], typ: u16, queue_num: u16) -> *mut nlmsghdr {
+unsafe fn nfq_hdr_put(buf: &mut [u32], typ: u16, queue_num: u16) -> *mut nlmsghdr {
     let nlh = mnl_sys::mnl_nlmsg_put_header(buf.as_mut_ptr() as _);
     (*nlh).nlmsg_type = ((NFNL_SUBSYS_QUEUE as u16) << 8) | typ;
     (*nlh).nlmsg_flags = NLM_F_REQUEST as u16;
@@ -465,7 +465,7 @@ impl Queue {
     /// indicate the capability of accepting offloaded packets.
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_BIND as u8,
@@ -497,7 +497,7 @@ impl Queue {
     /// Set whether the kernel should drop or accept a packet if the queue is full.
     pub fn set_fail_open(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_FAIL_OPEN) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_FAIL_OPEN));
@@ -508,7 +508,7 @@ impl Queue {
     /// Set whether we should receive GSO-enabled and partial checksum packets.
     pub fn set_recv_gso(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_GSO) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_GSO));
@@ -519,7 +519,7 @@ impl Queue {
     /// Set whether we should receive UID/GID along with packets.
     pub fn set_recv_uid_gid(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_UID_GID) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_UID_GID));
@@ -530,7 +530,7 @@ impl Queue {
     /// Set whether we should receive security context strings along with packets.
     pub fn set_recv_security_context(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_SECCTX) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_SECCTX));
@@ -541,7 +541,7 @@ impl Queue {
     /// Set whether we should receive connteack information along with packets.
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_CONNTRACK) } else { 0 });
             mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_CONNTRACK));
@@ -552,7 +552,7 @@ impl Queue {
     /// Unbind from a specific protocol and queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
-            let mut buf = [0; 8192];
+            let mut buf = [0u32; 8192 / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_UNBIND as u8,
@@ -593,7 +593,7 @@ impl Queue {
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
         unsafe {
             let nfg = mnl_nlmsg_get_payload(msg.nlh) as *mut nfgenmsg;
-            let mut buf = [0; 8192 + 0xffff];
+            let mut buf = [0u32; (8192 + 0x10000) / 4];
             let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_VERDICT as u16, be16_to_cpu((*nfg).res_id));
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match msg.verdict {
