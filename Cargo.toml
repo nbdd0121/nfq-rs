@@ -10,5 +10,4 @@ homepage = "https://github.com/nbdd0121/nfq-rs"
 repository = "https://github.com/nbdd0121/nfq-rs.git"
 
 [dependencies]
-mnl-sys = "0.1"
 libc = "0.2"

@@ -6,8 +6,7 @@ packet filter chains.
 ## License
 In contrast to `libnetfilter_queue` which is licensed under GPL 2.0, which will require all
 binaries using that library to be bound by GPL, `nfq` is dual-licensed under MIT/Apache-2.0.
-To achieve this, `nfq` does not use `libnetfilter_queue`. Instead, `nfq` communicates using
-libmnl directly, which is licensed under LGPL.
+`nfq` achieves this by communicates with kernel via NETLINK sockets directly.
 
 ## Example
 

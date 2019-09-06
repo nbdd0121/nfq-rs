@@ -6,8 +6,7 @@
 //! # License
 //! In contrast to `libnetfilter_queue` which is licensed under GPL 2.0, which will require all
 //! binaries using that library to be bound by GPL, `nfq` is dual-licensed under MIT/Apache-2.0.
-//! To achieve this, `nfq` does not use `libnetfilter_queue`. Instead, `nfq` communicates using
-//! libmnl directly, which is licensed under LGPL.
+//! `nfq` achieves this by communicates with kernel via NETLINK sockets directly.
 //!
 //! # Example
 //!
@@ -30,7 +29,6 @@
 mod binding;
 
 use libc::*;
-use mnl_sys::{self, *};
 use binding::*;
 use std::sync::Arc;
 use std::io::Result;
@@ -469,14 +467,13 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
     }
 }
 
-unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int {
+unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
     const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
     const NFGEN_HDRLEN: usize = (std::mem::size_of::<nfgenmsg>() + 3) &! 3;
     let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const nfgenmsg;
     let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
     let attr_len = (*nlh).nlmsg_len as usize - NLMSG_HDRLEN - NFGEN_HDRLEN;
 
-    let queue = &mut *(data as *mut Queue);
     let mut message = Message {
         buffer: Arc::clone(&queue.buffer),
         id: (*nfgenmsg).res_id,
@@ -507,7 +504,6 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
     assert!(!message.hdr.is_null());
 
     queue.queue.push_back(message);
-    return MNL_CB_OK;
 }
 
 /// A NetFilter queue.
@@ -706,12 +702,41 @@ impl Queue {
             }
 
             // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
-            if size as usize > buf_size {
+            let mut size = size as usize;
+            if size > buf_size {
                 return Err(std::io::Error::from_raw_os_error(ENOSPC));
             }
 
-            if unsafe { mnl_cb_run(buf.as_mut_ptr() as _, size as usize, 0, self.portid, Some(queue_cb), self as *mut Queue as _) } < 0 {
-                return Err(std::io::Error::last_os_error());
+            const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
+            let mut nlh = buf.as_ptr() as *const nlmsghdr;
+            loop {
+                if size < NLMSG_HDRLEN { break }
+                let nlmsg_len = unsafe { (*nlh).nlmsg_len } as usize;
+                if size < nlmsg_len { break }
+
+                if unsafe { (*nlh).nlmsg_flags } & NLM_F_DUMP_INTR as u16 != 0 {
+                    return Err(std::io::Error::from_raw_os_error(EINTR));
+                }
+
+                match unsafe { (*nlh).nlmsg_type } as c_int {
+                    NLMSG_ERROR => {
+                        assert!(nlmsg_len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
+                        let err = (nlh as usize + NLMSG_HDRLEN) as *const nlmsgerr;
+                        let errno = unsafe { (*err).error }.abs();
+                        if errno == 0 { break }
+                        return Err(std::io::Error::from_raw_os_error(errno));
+                    }
+                    NLMSG_DONE => break,
+                    v if v < NLMSG_MIN_TYPE => (),
+                    _ => unsafe { parse_msg(nlh, self) },
+                }
+
+                let aligned_len = (nlmsg_len + 3) &! 3;
+                nlh = (nlh as usize + aligned_len) as *const nlmsghdr;
+                size = match size.checked_sub(aligned_len) {
+                    Some(v) => v,
+                    None => break,
+                }
             }
         }
 
