@@ -62,15 +62,15 @@ pub enum Verdict {
     Stop,
 }
 
-unsafe fn nfq_hdr_put(buf: &mut [u32], typ: u16, queue_num: u16) -> *mut nlmsghdr {
-    let nlh = mnl_sys::mnl_nlmsg_put_header(buf.as_mut_ptr() as _);
+// Messages are expected to be 32-bit aligned, so we take a [u32] as buffer instead [u8].
+unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16) {
+    let nlh = nlmsg.as_hdr();
     (*nlh).nlmsg_type = ((NFNL_SUBSYS_QUEUE as u16) << 8) | typ;
     (*nlh).nlmsg_flags = NLM_F_REQUEST as u16;
-    let nfg = mnl_sys::mnl_nlmsg_put_extra_header(nlh, std::mem::size_of::<nfgenmsg>()) as *mut nfgenmsg;
-    (*nfg).nfgen_family = libc::AF_UNSPEC as u8;
+    let nfg: *mut nfgenmsg = nlmsg.extra_header();
+    (*nfg).nfgen_family = AF_UNSPEC as u8;
     (*nfg).version = NFNETLINK_V0 as u8;
     (*nfg).res_id = be16_to_cpu(queue_num);
-    nlh
 }
 
 /// Helper functions for parsing `nlattr`. We do this ourselves instead of using libmnl to avoid
@@ -94,6 +94,67 @@ mod nla {
     }
 }
 
+struct Nlmsg<'a> {
+    buf: &'a mut [u32],
+    len: usize,
+}
+
+impl<'a> Nlmsg<'a> {
+    unsafe fn new(buf: &'a mut [u32]) -> Self {
+        // First clear all of the header
+        let hdrlen = (std::mem::size_of::<nlmsghdr>() + 3) / 4;
+        std::ptr::write_bytes(buf.as_mut_ptr(), 0, hdrlen);
+        Self {
+            buf,
+            len: hdrlen,
+        }
+    }
+
+    /// Allocate and zero for an extra header
+    fn extra_header<T>(&mut self) -> *mut T {
+        let len = (std::mem::size_of::<T>() + 3) / 4;
+        let ptr = unsafe { self.buf.as_mut_ptr().offset(self.len as isize) };
+        self.len += len;
+        assert!(self.len <= self.buf.len());
+        unsafe { std::ptr::write_bytes(ptr, 0, len) };
+        ptr as _
+    }
+
+    /// Put an attribute
+    fn put_raw(&mut self, typ: u16, len: usize) -> *mut u32 {
+        let nla_len = len + std::mem::size_of::<nlattr>();
+        let attr: *mut nlattr = unsafe { self.buf.as_mut_ptr().offset(self.len as isize) as _ };
+        self.len += (nla_len + 3) / 4;
+        assert!(self.len <= self.buf.len());
+        unsafe {
+            (*attr).nla_type = typ;
+            (*attr).nla_len = nla_len as _;
+            nla::get_payload::<u32>(attr) as *mut u32
+        }
+    }
+
+    /// Put a slice of arbitary data. This is safe as it copies its memory representation only.
+    fn put_slice<T>(&mut self, typ: u16, value: &[T]) {
+        let ptr = self.put_raw(typ, value.len() * std::mem::size_of::<T>());
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), ptr as _, value.len()) };
+    }
+
+    /// Put an u32 attribute, convert to big endian
+    fn put_u32(&mut self, typ: u16, data: u32) {
+        let ptr = self.put_raw(typ, 4);
+        unsafe { *ptr = be32_to_cpu(data) };
+    }
+
+    fn as_hdr(&mut self) -> *mut nlmsghdr {
+        self.buf.as_mut_ptr() as _
+    }
+
+    unsafe fn adjust_len(&mut self) {
+        let hdr = self.as_hdr();
+        (*hdr).nlmsg_len = (self.len * 4) as _;
+    }
+}
+
 enum PayloadState {
     Unmodified,
     Modified,
@@ -105,7 +166,7 @@ pub struct Message {
     // This is here for lifetime requirements, but we're not using it directly.
     #[allow(dead_code)]
     buffer: Arc<Vec<u8>>,
-    nlh: *const nlmsghdr,
+    id: u16,
     nfmark: u32,
     nfmark_dirty: bool,
     indev: u32,
@@ -389,7 +450,7 @@ unsafe extern "C" fn queue_cb(nlh: *const nlmsghdr, data: *mut c_void) -> c_int 
     let queue = &mut *(data as *mut Queue);
     let mut message = Message {
         buffer: Arc::clone(&queue.buffer),
-        nlh,
+        id: (*(mnl_nlmsg_get_payload(nlh) as *mut nfgenmsg)).res_id,
         hdr: std::ptr::null(),
         nfmark: 0,
         nfmark_dirty: false,
@@ -482,7 +543,9 @@ impl Queue {
         Ok(())
     }
 
-    unsafe fn send_nlmsg(&self, nlh: *mut nlmsghdr) -> std::io::Result<()> {
+    unsafe fn send_nlmsg(&self, mut nlh: Nlmsg) -> std::io::Result<()> {
+        nlh.adjust_len();
+        let nlh = nlh.as_hdr();
         let mut addr: sockaddr_nl = std::mem::zeroed();
         addr.nl_family = AF_NETLINK as _;
         if sendto(
@@ -502,31 +565,25 @@ impl Queue {
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_BIND as u8,
                 pf: 0,
                 _pad: 0,
             };
-            mnl_attr_put(
-                nlh, NFQA_CFG_CMD as u16,
-                std::mem::size_of::<nfqnl_msg_config_cmd>(),
-                &command as *const nfqnl_msg_config_cmd as _
-            );
-            self.send_nlmsg(nlh)?;
+            nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
+            self.send_nlmsg(nlmsg)?;
 
             // Maybe we should make this configurable
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
             let params = nfqnl_msg_config_params {
                 copy_range: be32_to_cpu(0xffff),
                 copy_mode: NFQNL_COPY_PACKET as u8,
             };
-            mnl_attr_put(
-                nlh, NFQA_CFG_PARAMS as u16,
-                std::mem::size_of::<nfqnl_msg_config_params>(),
-                &params as *const nfqnl_msg_config_params as _
-            );
-            self.send_nlmsg(nlh)
+            nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -534,10 +591,11 @@ impl Queue {
     pub fn set_fail_open(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_FAIL_OPEN) } else { 0 });
-            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_FAIL_OPEN));
-            self.send_nlmsg(nlh)
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 });
+            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -545,10 +603,11 @@ impl Queue {
     pub fn set_recv_gso(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_GSO) } else { 0 });
-            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_GSO));
-            self.send_nlmsg(nlh)
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_GSO } else { 0 });
+            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -556,10 +615,11 @@ impl Queue {
     pub fn set_recv_uid_gid(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_UID_GID) } else { 0 });
-            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_UID_GID));
-            self.send_nlmsg(nlh)
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_UID_GID } else { 0 });
+            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -567,10 +627,11 @@ impl Queue {
     pub fn set_recv_security_context(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_SECCTX) } else { 0 });
-            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_SECCTX));
-            self.send_nlmsg(nlh)
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_SECCTX } else { 0 });
+            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -578,10 +639,11 @@ impl Queue {
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
-            mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS as u16, if enabled { be32_to_cpu(NFQA_CFG_F_CONNTRACK) } else { 0 });
-            mnl_attr_put_u32(nlh, NFQA_CFG_MASK as u16, be32_to_cpu(NFQA_CFG_F_CONNTRACK));
-            self.send_nlmsg(nlh)
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_CONNTRACK } else { 0 });
+            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -589,18 +651,15 @@ impl Queue {
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_CONFIG as u16, queue_num);
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_UNBIND as u8,
                 pf: 0,
                 _pad: 0,
             };
-            mnl_attr_put(
-                nlh, NFQA_CFG_CMD as u16,
-                std::mem::size_of::<nfqnl_msg_config_cmd>(),
-                &command as *const nfqnl_msg_config_cmd as _
-            );
-            self.send_nlmsg(nlh)
+            nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
+            self.send_nlmsg(nlmsg)
         }
     }
 
@@ -634,9 +693,9 @@ impl Queue {
     /// Verdict a message.
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
         unsafe {
-            let nfg = mnl_nlmsg_get_payload(msg.nlh) as *mut nfgenmsg;
             let mut buf = [0u32; (8192 + 0x10000) / 4];
-            let nlh = nfq_hdr_put(&mut buf, NFQNL_MSG_VERDICT as u16, be16_to_cpu((*nfg).res_id));
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id));
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match msg.verdict {
                     Verdict::Drop => 0,
@@ -647,17 +706,17 @@ impl Queue {
                 }),
                 id: (*msg.hdr).packet_id,
             };
-            mnl_sys::mnl_attr_put(nlh, NFQA_VERDICT_HDR as u16, std::mem::size_of::<nfqnl_msg_verdict_hdr>(), &vh as *const nfqnl_msg_verdict_hdr as _);
+            nlmsg.put_slice(NFQA_VERDICT_HDR as u16, std::slice::from_ref(&vh));
             if msg.nfmark_dirty {
-                mnl_sys::mnl_attr_put_u32(nlh, NFQA_MARK as u16, be32_to_cpu(msg.nfmark));
+                nlmsg.put_u32(NFQA_MARK as u16, msg.nfmark);
             }
             if let PayloadState::Unmodified = msg.payload_state {} else {
                 if msg.verdict != Verdict::Drop {
                     let payload = msg.get_payload();
-                    mnl_sys::mnl_attr_put(nlh, NFQA_PAYLOAD as u16, payload.len(), payload.as_ptr() as _);
+                    nlmsg.put_slice(NFQA_PAYLOAD as u16, payload);
                 }
             }
-            self.send_nlmsg(nlh)
+            self.send_nlmsg(nlmsg)
         }
     }
 }
