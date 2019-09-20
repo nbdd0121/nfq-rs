@@ -510,7 +510,6 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 pub struct Queue {
     /// NetLink socket
     fd: libc::c_int,
-    portid: libc::c_uint,
     /// In order to support out-of-order verdict and batch recv, we need to carefully manage the
     /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
     /// We use Arc for this case, and keep an extra copy here, so that if all messages are handled
@@ -533,7 +532,6 @@ impl Queue {
 
         let mut queue = Queue {
             fd,
-            portid: 0,
             buffer: Arc::new(Vec::with_capacity((8192 + 0x10000) / 4)),
             queue: VecDeque::new(),
         };
@@ -544,12 +542,6 @@ impl Queue {
             return Err(std::io::Error::last_os_error());
         }
 
-        let mut len = std::mem::size_of_val(&addr) as _;
-        if unsafe { getsockname(fd, &mut addr as *mut sockaddr_nl as _, &mut len) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        queue.portid = addr.nl_pid;
         queue.set_recv_enobufs(false)?;
         Ok(queue)
     }
