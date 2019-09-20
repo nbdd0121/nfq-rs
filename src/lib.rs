@@ -546,7 +546,7 @@ impl Queue {
         Ok(queue)
     }
 
-    /// Change whether ENOBUFS should be received by the application if the kenrel queue is full.
+    /// Change whether ENOBUFS should be received by the application if the kernel queue is full.
     /// As user-space usually cannot do any special about this, `Queue::open()` will turn this off
     /// by default.
     pub fn set_recv_enobufs(&mut self, enable: bool) -> std::io::Result<()> {
