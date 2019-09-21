@@ -510,6 +510,7 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 pub struct Queue {
     /// NetLink socket
     fd: libc::c_int,
+    bufsize: usize,
     /// In order to support out-of-order verdict and batch recv, we need to carefully manage the
     /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
     /// We use Arc for this case, and keep an extra copy here, so that if all messages are handled
@@ -532,7 +533,8 @@ impl Queue {
 
         let mut queue = Queue {
             fd,
-            buffer: Arc::new(Vec::with_capacity((8192 + 0x10000) / 4)),
+            bufsize: 0,
+            buffer: Arc::new(Vec::new()),
             queue: VecDeque::new(),
         };
 
@@ -577,8 +579,8 @@ impl Queue {
 
     /// Bind to a specific queue number.
     ///
-    /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
-    /// indicate the capability of accepting offloaded packets.
+    /// This method will set the copy range to 65535 by default. It can be changed by using
+    /// [`set_copy_range`](#method.set_copy_range).
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
@@ -591,17 +593,8 @@ impl Queue {
             };
             nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
             self.send_nlmsg(nlmsg)?;
-
-            // Maybe we should make this configurable
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
-            let params = nfqnl_msg_config_params {
-                copy_range: be32_to_cpu(0xffff),
-                copy_mode: NFQNL_COPY_PACKET as u8,
-            };
-            nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
-            self.send_nlmsg(nlmsg)
         }
+        self.set_copy_range(queue_num, 65535)
     }
 
     /// Set whether the kernel should drop or accept a packet if the queue is full.
@@ -664,6 +657,28 @@ impl Queue {
         }
     }
 
+    /// Set copy range. Packet larger than the specified range will be truncated. If the range
+    /// given is 0, only metadata will be copied.
+    ///
+    /// To get the original length of truncated packet, use
+    /// [`Message::get_original_len`](struct.Message.html#method.get_original_len).
+    pub fn set_copy_range(&mut self, queue_num: u16, range: u16) -> Result<()> {
+        unsafe {
+            let mut buf = [0u32; 8192 / 4];
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            let params = nfqnl_msg_config_params {
+                copy_range: be32_to_cpu(range as u32),
+                copy_mode: if range == 0 { NFQNL_COPY_META } else { NFQNL_COPY_PACKET } as u8,
+            };
+            nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
+            self.send_nlmsg(nlmsg)?;
+        }
+        self.bufsize = (8192 + range as usize + 3) / 4;
+        self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
+        Ok(())
+    }
+
     /// Unbind from a specific queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
@@ -687,7 +702,7 @@ impl Queue {
             let buf = match Arc::get_mut(&mut self.buffer) {
                 Some(v) => v,
                 None => {
-                    self.buffer = Arc::new(Vec::with_capacity((8192 + 0x10000) / 4));
+                    self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
                     Arc::get_mut(&mut self.buffer).unwrap()
                 }
             };
