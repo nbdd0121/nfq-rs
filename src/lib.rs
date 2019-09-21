@@ -575,7 +575,7 @@ impl Queue {
         Ok(())
     }
 
-    /// Bind to a specific protocol and queue number.
+    /// Bind to a specific queue number.
     ///
     /// Currently this method will also initialise the queue with COPY_PACKET mode, and will
     /// indicate the capability of accepting offloaded packets.
@@ -664,7 +664,7 @@ impl Queue {
         }
     }
 
-    /// Unbind from a specific protocol and queue number.
+    /// Unbind from a specific queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
@@ -684,7 +684,13 @@ impl Queue {
     pub fn recv(&mut self) -> Result<Message> {
         // We have processed all messages in previous recv batch, do next iteration
         while self.queue.is_empty() {
-            let buf = Arc::make_mut(&mut self.buffer);
+            let buf = match Arc::get_mut(&mut self.buffer) {
+                Some(v) => v,
+                None => {
+                    self.buffer = Arc::new(Vec::with_capacity((8192 + 0x10000) / 4));
+                    Arc::get_mut(&mut self.buffer).unwrap()
+                }
+            };
             let buf_size = buf.capacity();
             unsafe { buf.set_len(buf_size) }
 
