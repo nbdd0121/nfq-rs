@@ -362,17 +362,20 @@ impl Message {
 
     /// Get the associated conntrack information.
     #[inline]
+    #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn get_conntrack(&self) -> Option<&Conntrack> {
         self.ct.as_ref()
     }
 }
 
 /// Conntrack information associated with the message
+#[cfg_attr(not(feature = "ct"), doc(hidden))]
 pub struct Conntrack {
     state: u32,
     id: u32,
 }
 
+#[cfg_attr(not(feature = "ct"), doc(hidden))]
 pub mod conntrack {
     #[derive(Debug)]
     pub enum State {
@@ -646,6 +649,7 @@ impl Queue {
     }
 
     /// Set whether we should receive connteack information along with packets.
+    #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
