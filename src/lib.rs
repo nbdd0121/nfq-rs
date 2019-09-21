@@ -549,8 +549,8 @@ impl Queue {
     }
 
     /// Change whether ENOBUFS should be received by the application if the kernel queue is full.
-    /// As user-space usually cannot do any special about this, `Queue::open()` will turn this off
-    /// by default.
+    /// As user-space usually cannot do any special about this, [`open`](#method.open) will turn
+    /// this off by default.
     pub fn set_recv_enobufs(&mut self, enable: bool) -> std::io::Result<()> {
         let val = (!enable) as c_int;
         if unsafe { setsockopt(
@@ -676,6 +676,19 @@ impl Queue {
         }
         self.bufsize = (8192 + range as usize + 3) / 4;
         self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
+        Ok(())
+    }
+
+    /// Set the maximum kernel queue length. If the application cannot [`recv`](#method.recv) fast
+    /// enough, newly queued packet will be dropped (or accepted if fail open is enabled).
+    pub fn set_queue_max_len(&mut self, queue_num: u16, len: u32) -> Result<()> {
+        unsafe {
+            let mut buf = [0u32; 8192 / 4];
+            let mut nlmsg = Nlmsg::new(&mut buf);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nlmsg.put_u32(NFQA_CFG_QUEUE_MAXLEN as u16, len);
+            self.send_nlmsg(nlmsg)?;
+        }
         Ok(())
     }
 
