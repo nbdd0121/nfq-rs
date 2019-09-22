@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! Here is an example which accepts all packets.
-//! ```rust,ignore
+//! ```no_run
 //! use nfq::{Queue, Verdict};
 //!
 //! fn main() -> std::io::Result<()> {
@@ -678,7 +678,11 @@ impl Queue {
             nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
             self.send_nlmsg(nlmsg)?;
         }
-        self.bufsize = (8192 + range as usize + 3) / 4;
+
+        // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
+        let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
+
+        self.bufsize = (metadata_size + range as usize + 3) / 4;
         self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
         Ok(())
     }
