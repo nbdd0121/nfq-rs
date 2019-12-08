@@ -30,6 +30,7 @@ mod binding;
 
 use libc::*;
 use binding::*;
+use binding::{NFNETLINK_V0, NFNL_SUBSYS_QUEUE};
 use std::sync::Arc;
 use std::io::Result;
 use std::time::{Duration, SystemTime};
