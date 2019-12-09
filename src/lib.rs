@@ -28,9 +28,13 @@
 
 mod binding;
 
-use libc::*;
+use libc::{
+    bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
+    socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_TRUNC, NETLINK_NETFILTER,
+    NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_DUMP_INTR, NLM_F_REQUEST,
+    PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+};
 use binding::*;
-use binding::{NFNETLINK_V0, NFNL_SUBSYS_QUEUE};
 use std::sync::Arc;
 use std::io::Result;
 use std::time::{Duration, SystemTime};
