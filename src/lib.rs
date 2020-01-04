@@ -527,6 +527,8 @@ pub struct Queue {
     /// We can receive multiple messages from kernel in a single recv, so we keep a queue
     /// internally before everything is consumed.
     queue: VecDeque<Message>,
+    /// Message buffer reused across verdict calls
+    verdict_buffer: Option<Box<[u32; (8192 + 0x10000) / 4]>>,
 }
 
 unsafe impl Send for Queue {}
@@ -544,6 +546,7 @@ impl Queue {
             bufsize: 0,
             buffer: Arc::new(Vec::new()),
             queue: VecDeque::new(),
+            verdict_buffer: Some(Box::new(unsafe { std::mem::zeroed() })),
         };
 
         let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
@@ -786,9 +789,8 @@ impl Queue {
     /// Verdict a message.
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
         unsafe {
-            // Performance is critical here: use uninitialized to avoid zeroing the memory.
-            let mut buf: [u32; (8192 + 0x10000) / 4] = std::mem::uninitialized();
-            let mut nlmsg = Nlmsg::new(&mut buf);
+            let mut buffer = self.verdict_buffer.take().unwrap();
+            let mut nlmsg = Nlmsg::new(&mut buffer[..]);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id));
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match msg.verdict {
@@ -810,7 +812,9 @@ impl Queue {
                     nlmsg.put_slice(NFQA_PAYLOAD as u16, payload);
                 }
             }
-            self.send_nlmsg(nlmsg)
+            let ret = self.send_nlmsg(nlmsg);
+            self.verdict_buffer = Some(buffer);
+            ret
         }
     }
 }
