@@ -735,14 +735,14 @@ impl Queue {
             let buf_size = buf.capacity();
             unsafe { buf.set_len(buf_size) }
 
-            let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size, MSG_TRUNC) };
+            let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size * 4, MSG_TRUNC) };
             if size < 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
             // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
             let mut size = size as usize;
-            if size > buf_size {
+            if size > buf_size * 4 {
                 return Err(std::io::Error::from_raw_os_error(ENOSPC));
             }
 
