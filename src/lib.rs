@@ -32,13 +32,15 @@ use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
     socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_TRUNC, NETLINK_NETFILTER,
     NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_DUMP_INTR, NLM_F_REQUEST,
-    PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    NLM_F_ACK, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
 use binding::*;
 use std::sync::Arc;
 use std::io::Result;
 use std::time::{Duration, SystemTime};
 use std::collections::VecDeque;
+
+const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
 
 fn be16_to_cpu(x: u16) -> u16 {
     u16::from_ne_bytes(x.to_be_bytes())
@@ -66,10 +68,10 @@ pub enum Verdict {
 }
 
 // Messages are expected to be 32-bit aligned, so we take a [u32] as buffer instead [u8].
-unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16) {
+unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16, ack: bool) {
     let nlh = nlmsg.as_hdr();
     (*nlh).nlmsg_type = ((NFNL_SUBSYS_QUEUE as u16) << 8) | typ;
-    (*nlh).nlmsg_flags = NLM_F_REQUEST as u16;
+    (*nlh).nlmsg_flags = (NLM_F_REQUEST | if ack { NLM_F_ACK } else { 0 }) as u16;
     let nfg: *mut nfgenmsg = nlmsg.extra_header();
     (*nfg).nfgen_family = AF_UNSPEC as u8;
     (*nfg).version = NFNETLINK_V0 as u8;
@@ -476,7 +478,6 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
 }
 
 unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
-    const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
     const NFGEN_HDRLEN: usize = (std::mem::size_of::<nfgenmsg>() + 3) &! 3;
     let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const nfgenmsg;
     let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
@@ -541,10 +542,12 @@ impl Queue {
             return Err(std::io::Error::last_os_error());
         }
 
+        let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
+
         let mut queue = Queue {
             fd,
-            bufsize: 0,
-            buffer: Arc::new(Vec::new()),
+            bufsize: metadata_size,
+            buffer: Arc::new(Vec::with_capacity(metadata_size)),
             queue: VecDeque::new(),
             verdict_buffer: Some(Box::new(unsafe { std::mem::zeroed() })),
         };
@@ -596,7 +599,7 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_BIND as u8,
                 pf: 0,
@@ -604,6 +607,7 @@ impl Queue {
             };
             nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
             self.send_nlmsg(nlmsg)?;
+            self.recv_error()?;
         }
         self.set_copy_range(queue_num, 65535)
     }
@@ -613,10 +617,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 });
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
     }
 
@@ -625,10 +630,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_GSO } else { 0 });
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
     }
 
@@ -637,10 +643,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_UID_GID } else { 0 });
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
     }
 
@@ -649,10 +656,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_SECCTX } else { 0 });
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
     }
 
@@ -662,10 +670,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_CONNTRACK } else { 0 });
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
     }
 
@@ -678,13 +687,14 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             let params = nfqnl_msg_config_params {
                 copy_range: be32_to_cpu(range as u32),
                 copy_mode: if range == 0 { NFQNL_COPY_META } else { NFQNL_COPY_PACKET } as u8,
             };
             nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
             self.send_nlmsg(nlmsg)?;
+            self.recv_error()?;
         }
 
         // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
@@ -701,11 +711,11 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             nlmsg.put_u32(NFQA_CFG_QUEUE_MAXLEN as u16, len);
             self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
-        Ok(())
     }
 
     /// Unbind from a specific queue number.
@@ -713,73 +723,91 @@ impl Queue {
         unsafe {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             let command = nfqnl_msg_config_cmd {
                 command: NFQNL_CFG_CMD_UNBIND as u8,
                 pf: 0,
                 _pad: 0,
             };
             nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
-            self.send_nlmsg(nlmsg)
+            self.send_nlmsg(nlmsg)?;
+            self.recv_error()
         }
+    }
+
+    // Receive an nlmsg, using callback to process them. If Ok(true) is returned it means we got an
+    // ACK.
+    fn recv_nlmsg(&mut self, mut callback: impl FnMut(&mut Self, *const nlmsghdr)) -> Result<bool> {
+        let buf = match Arc::get_mut(&mut self.buffer) {
+            Some(v) => v,
+            None => {
+                self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
+                Arc::get_mut(&mut self.buffer).unwrap()
+            }
+        };
+        let buf_size = buf.capacity();
+        unsafe { buf.set_len(buf_size) }
+
+        let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size * 4, MSG_TRUNC) };
+        if size < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
+        let mut size = size as usize;
+        if size > buf_size * 4 {
+            return Err(std::io::Error::from_raw_os_error(ENOSPC));
+        }
+
+        let mut nlh = buf.as_ptr() as *const nlmsghdr;
+        loop {
+            if size < NLMSG_HDRLEN { break }
+            let nlmsg_len = unsafe { (*nlh).nlmsg_len } as usize;
+            if size < nlmsg_len { break }
+
+            if unsafe { (*nlh).nlmsg_flags } & NLM_F_DUMP_INTR as u16 != 0 {
+                return Err(std::io::Error::from_raw_os_error(EINTR));
+            }
+
+            let nlmsg_type = unsafe { (*nlh).nlmsg_type } as c_int;
+            match nlmsg_type {
+                NLMSG_ERROR => {
+                    assert!(nlmsg_len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
+                    let err = (nlh as usize + NLMSG_HDRLEN) as *const nlmsgerr;
+                    let errno = unsafe { (*err).error }.abs();
+                    if errno == 0 { return Ok(true) }
+                    return Err(std::io::Error::from_raw_os_error(errno));
+                }
+                NLMSG_DONE => return Ok(true),
+                v if v < NLMSG_MIN_TYPE => (),
+                _ => callback(self, nlh),
+            }
+
+            let aligned_len = (nlmsg_len + 3) &! 3;
+            nlh = (nlh as usize + aligned_len) as *const nlmsghdr;
+            size = match size.checked_sub(aligned_len) {
+                Some(v) => v,
+                None => break,
+            }
+        }
+
+        Ok(false)
+    }
+
+    // Receive the next error message. Returns Ok only if errno is 0 (which is a response to a
+    // message with F_ACK set).
+    fn recv_error(&mut self) -> Result<()> {
+        while !self.recv_nlmsg(|_, _| ())? {}
+        Ok(())
     }
 
     /// Receive a packet from the queue.
     pub fn recv(&mut self) -> Result<Message> {
         // We have processed all messages in previous recv batch, do next iteration
         while self.queue.is_empty() {
-            let buf = match Arc::get_mut(&mut self.buffer) {
-                Some(v) => v,
-                None => {
-                    self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
-                    Arc::get_mut(&mut self.buffer).unwrap()
-                }
-            };
-            let buf_size = buf.capacity();
-            unsafe { buf.set_len(buf_size) }
-
-            let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size * 4, MSG_TRUNC) };
-            if size < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
-            let mut size = size as usize;
-            if size > buf_size * 4 {
-                return Err(std::io::Error::from_raw_os_error(ENOSPC));
-            }
-
-            const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
-            let mut nlh = buf.as_ptr() as *const nlmsghdr;
-            loop {
-                if size < NLMSG_HDRLEN { break }
-                let nlmsg_len = unsafe { (*nlh).nlmsg_len } as usize;
-                if size < nlmsg_len { break }
-
-                if unsafe { (*nlh).nlmsg_flags } & NLM_F_DUMP_INTR as u16 != 0 {
-                    return Err(std::io::Error::from_raw_os_error(EINTR));
-                }
-
-                match unsafe { (*nlh).nlmsg_type } as c_int {
-                    NLMSG_ERROR => {
-                        assert!(nlmsg_len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
-                        let err = (nlh as usize + NLMSG_HDRLEN) as *const nlmsgerr;
-                        let errno = unsafe { (*err).error }.abs();
-                        if errno == 0 { break }
-                        return Err(std::io::Error::from_raw_os_error(errno));
-                    }
-                    NLMSG_DONE => break,
-                    v if v < NLMSG_MIN_TYPE => (),
-                    _ => unsafe { parse_msg(nlh, self) },
-                }
-
-                let aligned_len = (nlmsg_len + 3) &! 3;
-                nlh = (nlh as usize + aligned_len) as *const nlmsghdr;
-                size = match size.checked_sub(aligned_len) {
-                    Some(v) => v,
-                    None => break,
-                }
-            }
+            self.recv_nlmsg(|this, nlh| {
+                unsafe { parse_msg(nlh, this) };
+            })?;
         }
 
         let msg = self.queue.pop_front().unwrap();
@@ -791,7 +819,7 @@ impl Queue {
         unsafe {
             let mut buffer = self.verdict_buffer.take().unwrap();
             let mut nlmsg = Nlmsg::new(&mut buffer[..]);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id));
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id), false);
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match msg.verdict {
                     Verdict::Drop => 0,
