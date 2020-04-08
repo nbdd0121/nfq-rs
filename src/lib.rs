@@ -53,7 +53,7 @@ fn be64_to_cpu(x: u64) -> u64 {
 }
 
 /// Decision made on a specific packet.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Discard the packet
     Drop,
@@ -184,6 +184,7 @@ impl<'a> Nlmsg<'a> {
     }
 }
 
+#[derive(Debug)]
 enum PayloadState {
     Unmodified,
     Modified,
@@ -191,6 +192,7 @@ enum PayloadState {
 }
 
 /// A network packet with associated metadata.
+#[derive(Debug)]
 pub struct Message {
     // This is here for lifetime requirements, but we're not using it directly.
     #[allow(dead_code)]
@@ -377,6 +379,7 @@ impl Message {
 
 /// Conntrack information associated with the message
 #[cfg_attr(not(feature = "ct"), doc(hidden))]
+#[derive(Debug)]
 pub struct Conntrack {
     state: u32,
     id: u32,
