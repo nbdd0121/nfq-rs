@@ -40,7 +40,7 @@ use std::io::Result;
 use std::time::{Duration, SystemTime};
 use std::collections::VecDeque;
 
-const NLMSG_HDRLEN: usize = (std::mem::size_of::<nlmsghdr>() + 3) &! 3;
+const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
 
 fn be16_to_cpu(x: u16) -> u16 {
     u16::from_ne_bytes(x.to_be_bytes())
@@ -50,6 +50,11 @@ fn be32_to_cpu(x: u32) -> u32 {
 }
 fn be64_to_cpu(x: u64) -> u64 {
     u64::from_ne_bytes(x.to_be_bytes())
+}
+
+/// Netlink messages pad to a 4 byte alignment between sections.
+const fn nfq_align(len: usize) -> usize {
+    (len + 3) & !3
 }
 
 /// Decision made on a specific packet.
@@ -142,7 +147,7 @@ impl<'a> Nlmsg<'a> {
     /// Allocate and zero for an extra header
     fn extra_header<T>(&mut self) -> *mut T {
         let len = (std::mem::size_of::<T>() + 3) / 4;
-        let ptr = unsafe { self.buf.as_mut_ptr().offset(self.len as isize) };
+        let ptr = unsafe { self.buf.as_mut_ptr().add(self.len) };
         self.len += len;
         assert!(self.len <= self.buf.len());
         unsafe { std::ptr::write_bytes(ptr, 0, len) };
@@ -152,7 +157,7 @@ impl<'a> Nlmsg<'a> {
     /// Put an attribute
     fn put_raw(&mut self, typ: u16, len: usize) -> *mut u32 {
         let nla_len = len + std::mem::size_of::<nlattr>();
-        let attr: *mut nlattr = unsafe { self.buf.as_mut_ptr().offset(self.len as isize) as _ };
+        let attr: *mut nlattr = unsafe { self.buf.as_mut_ptr().add(self.len) as _ };
         self.len += (nla_len + 3) / 4;
         assert!(self.len <= self.buf.len());
         unsafe {
@@ -425,6 +430,8 @@ impl Conntrack {
 
 unsafe fn parse_ct_attr(attr: *const nlattr, ct: &mut Conntrack) {
     let typ = nla::get_type(attr) as c_uint;
+    // There are many more types, they just aren't handled yet.
+    #[allow(clippy::single_match)]
     match typ {
         CTA_ID => ct.id = nla::get_u32(attr),
         _ => (),
@@ -481,7 +488,7 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
 }
 
 unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
-    const NFGEN_HDRLEN: usize = (std::mem::size_of::<nfgenmsg>() + 3) &! 3;
+    const NFGEN_HDRLEN: usize = nfq_align(std::mem::size_of::<nfgenmsg>());
     let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const nfgenmsg;
     let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
     let attr_len = (*nlh).nlmsg_len as usize - NLMSG_HDRLEN - NFGEN_HDRLEN;
@@ -786,7 +793,7 @@ impl Queue {
                 _ => callback(self, nlh),
             }
 
-            let aligned_len = (nlmsg_len + 3) &! 3;
+            let aligned_len = nfq_align(nlmsg_len);
             nlh = (nlh as usize + aligned_len) as *const nlmsghdr;
             size = match size.checked_sub(aligned_len) {
                 Some(v) => v,
