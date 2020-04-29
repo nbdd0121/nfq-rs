@@ -228,6 +228,10 @@ pub struct Message {
 unsafe impl Send for Message {}
 
 impl Message {
+    /// Get the queue number.
+    #[inline]
+    pub fn get_queue_num(&self) -> u16 { self.id }
+
     /// Get the nfmark (fwmark) of the packet.
     #[inline]
     pub fn get_nfmark(&self) -> u32 { self.nfmark }
@@ -495,7 +499,7 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 
     let mut message = Message {
         buffer: Arc::clone(&queue.buffer),
-        id: (*nfgenmsg).res_id,
+        id: be16_to_cpu((*nfgenmsg).res_id),
         hdr: std::ptr::null(),
         nfmark: 0,
         nfmark_dirty: false,
@@ -829,7 +833,7 @@ impl Queue {
         unsafe {
             let mut buffer = self.verdict_buffer.take().unwrap();
             let mut nlmsg = Nlmsg::new(&mut buffer[..]);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, be16_to_cpu(msg.id), false);
+            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, msg.id, false);
             let vh = nfqnl_msg_verdict_hdr {
                 verdict: be32_to_cpu(match msg.verdict {
                     Verdict::Drop => 0,
