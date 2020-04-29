@@ -45,6 +45,9 @@ const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
 fn be16_to_cpu(x: u16) -> u16 {
     u16::from_ne_bytes(x.to_be_bytes())
 }
+fn cpu_to_be16(x: u16) -> u16 {
+    u16::from_be_bytes(x.to_ne_bytes())
+}
 fn be32_to_cpu(x: u32) -> u32 {
     u32::from_ne_bytes(x.to_be_bytes())
 }
@@ -228,6 +231,10 @@ pub struct Message {
 unsafe impl Send for Message {}
 
 impl Message {
+    /// Get the queue number (res_id).
+    #[inline]
+    pub fn get_queue_num(&self) -> u16 { cpu_to_be16(self.id) }
+
     /// Get the nfmark (fwmark) of the packet.
     #[inline]
     pub fn get_nfmark(&self) -> u32 { self.nfmark }
