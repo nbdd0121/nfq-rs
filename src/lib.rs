@@ -31,9 +31,9 @@ mod binding;
 use binding::*;
 use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
-    socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_TRUNC, NETLINK_NETFILTER,
-    NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR,
-    NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC,
+    NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
+    NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
 use std::collections::VecDeque;
 use std::io::Result;
@@ -578,6 +578,9 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 pub struct Queue {
     /// NetLink socket
     fd: libc::c_int,
+    /// Flag to send for recv operation. Decides whether or not the operation blocks until there is
+    /// message from the kernel.
+    recv_flag: libc::c_int,
     bufsize: usize,
     /// In order to support out-of-order verdict and batch recv, we need to carefully manage the
     /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
@@ -605,6 +608,7 @@ impl Queue {
 
         let mut queue = Queue {
             fd,
+            recv_flag: 0,
             bufsize: metadata_size,
             buffer: Arc::new(Vec::with_capacity(metadata_size)),
             queue: VecDeque::new(),
@@ -813,6 +817,11 @@ impl Queue {
         }
     }
 
+    /// Set whether the recv function blocks or not
+    pub fn set_nonblocking(&mut self, nonblocking: bool) {
+        self.recv_flag = if nonblocking { MSG_DONTWAIT } else { 0 };
+    }
+
     /// Unbind from a specific queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
         unsafe {
@@ -843,7 +852,14 @@ impl Queue {
         let buf_size = buf.capacity();
         unsafe { buf.set_len(buf_size) }
 
-        let size = unsafe { recv(self.fd, buf.as_mut_ptr() as _, buf_size * 4, MSG_TRUNC) };
+        let size = unsafe {
+            recv(
+                self.fd,
+                buf.as_mut_ptr() as _,
+                buf_size * 4,
+                self.recv_flag | MSG_TRUNC,
+            )
+        };
         if size < 0 {
             return Err(std::io::Error::last_os_error());
         }
