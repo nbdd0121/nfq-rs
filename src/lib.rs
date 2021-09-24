@@ -28,17 +28,17 @@
 
 mod binding;
 
+use binding::*;
 use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
     socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_TRUNC, NETLINK_NETFILTER,
-    NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_DUMP_INTR, NLM_F_REQUEST,
-    NLM_F_ACK, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR,
+    NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
-use binding::*;
-use std::sync::Arc;
-use std::io::Result;
-use std::time::{Duration, SystemTime};
 use std::collections::VecDeque;
+use std::io::Result;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
 
@@ -87,7 +87,9 @@ unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16, ack: bool) {
 /// unnecessary function calls.
 mod nla {
     #[inline]
-    pub unsafe fn get_type(attr: *const libc::nlattr) -> u16 { (*attr).nla_type & (libc::NLA_TYPE_MASK as u16) }
+    pub unsafe fn get_type(attr: *const libc::nlattr) -> u16 {
+        (*attr).nla_type & (libc::NLA_TYPE_MASK as u16)
+    }
     #[inline]
     pub unsafe fn get_payload_len(attr: *const libc::nlattr) -> usize {
         (*attr).nla_len as usize - std::mem::size_of::<libc::nlattr>()
@@ -115,15 +117,22 @@ impl<'a> Iterator for AttrStream<'a> {
         let buf_left = self.buf.len() * 4;
 
         // Not enough space for an attribute header
-        if buf_left < std::mem::size_of::<libc::nlattr>() { return None }
+        if buf_left < std::mem::size_of::<libc::nlattr>() {
+            return None;
+        }
 
         let attr = self.buf.as_ptr() as *const nlattr;
         let nla_len = unsafe { (*attr).nla_len } as usize;
 
         // Make sure there are enough space for the entire attribute
-        assert!(buf_left >= nla_len, "truncated attribute {} < {}", buf_left, nla_len);
+        assert!(
+            buf_left >= nla_len,
+            "truncated attribute {} < {}",
+            buf_left,
+            nla_len
+        );
 
-        self.buf = &self.buf[(nla_len + 3) / 4 ..];
+        self.buf = &self.buf[(nla_len + 3) / 4..];
         Some(attr)
     }
 }
@@ -138,10 +147,7 @@ impl<'a> Nlmsg<'a> {
         // First clear all of the header
         let hdrlen = (std::mem::size_of::<nlmsghdr>() + 3) / 4;
         std::ptr::write_bytes(buf.as_mut_ptr(), 0, hdrlen);
-        Self {
-            buf,
-            len: hdrlen,
-        }
+        Self { buf, len: hdrlen }
     }
 
     /// Allocate and zero for an extra header
@@ -230,11 +236,15 @@ unsafe impl Send for Message {}
 impl Message {
     /// Get the queue number.
     #[inline]
-    pub fn get_queue_num(&self) -> u16 { self.id }
+    pub fn get_queue_num(&self) -> u16 {
+        self.id
+    }
 
     /// Get the nfmark (fwmark) of the packet.
     #[inline]
-    pub fn get_nfmark(&self) -> u32 { self.nfmark }
+    pub fn get_nfmark(&self) -> u32 {
+        self.nfmark
+    }
 
     /// Set the associated nfmark (fwmark) of the packet.
     #[inline]
@@ -247,30 +257,42 @@ impl Message {
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
     #[inline]
-    pub fn get_indev(&self) -> u32 { self.indev }
+    pub fn get_indev(&self) -> u32 {
+        self.indev
+    }
 
     /// Get the interface index of the bridge port the packet arrived on. If the packet is locally
     /// generated, or the input interface is no longer known (e.g. `POSTROUTING` chain), 0 is
     /// returned.
     #[inline]
-    pub fn get_physindev(&self) -> u32 { self.physindev }
+    pub fn get_physindev(&self) -> u32 {
+        self.physindev
+    }
 
     /// Get the interface index of the interface the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
     #[inline]
-    pub fn get_outdev(&self) -> u32 { self.outdev }
+    pub fn get_outdev(&self) -> u32 {
+        self.outdev
+    }
 
     /// Get the interface index of the bridge port the packet is to be transmitted from. If the
     /// packet is locally destinated, or the output interface is unknown (e.g. `PREROUTING` chain),
     /// 0 is returned.
     #[inline]
-    pub fn get_physoutdev(&self) -> u32 { self.physoutdev }
+    pub fn get_physoutdev(&self) -> u32 {
+        self.physoutdev
+    }
 
     /// Get the original length of the packet.
     #[inline]
     pub fn get_original_len(&self) -> usize {
-        if self.orig_len == 0 { self.payload.len() } else { self.orig_len as usize }
+        if self.orig_len == 0 {
+            self.payload.len()
+        } else {
+            self.orig_len as usize
+        }
     }
 
     /// Check if the packet is GSO-offloaded.
@@ -288,24 +310,32 @@ impl Message {
     /// Get the security context string of the local process sending the packet. If not applicable,
     /// `None` is returned.
     pub fn get_security_context(&self) -> Option<&str> {
-        if self.secctx.is_null() { return None }
+        if self.secctx.is_null() {
+            return None;
+        }
         unsafe { std::ffi::CStr::from_ptr(self.secctx).to_str().ok() }
     }
 
     /// Get the UID of the local process sending the packet. If not applicable, `None` is returned.
     #[inline]
-    pub fn get_uid(&self) -> Option<u32> { self.uid }
+    pub fn get_uid(&self) -> Option<u32> {
+        self.uid
+    }
 
     /// Get the GID of the local process sending the packet. If not applicable, `None` is returned.
     #[inline]
-    pub fn get_gid(&self) -> Option<u32> { self.gid }
+    pub fn get_gid(&self) -> Option<u32> {
+        self.gid
+    }
 
     /// Get the timestamp of the packet.
     pub fn get_timestamp(&self) -> Option<SystemTime> {
-        if self.timestamp.is_null() { return None }
+        if self.timestamp.is_null() {
+            return None;
+        }
         unsafe {
-            let duration = Duration::from_secs(be64_to_cpu((*self.timestamp).sec)) +
-                Duration::from_micros(be64_to_cpu((*self.timestamp).usec));
+            let duration = Duration::from_secs(be64_to_cpu((*self.timestamp).sec))
+                + Duration::from_micros(be64_to_cpu((*self.timestamp).usec));
             Some(SystemTime::UNIX_EPOCH + duration)
         }
     }
@@ -313,7 +343,9 @@ impl Message {
     /// Get the hardware address associated with the packet. For Ethernet packets, the hardware
     /// address returned will be the MAC address of the packet source host, if any.
     pub fn get_hw_addr(&self) -> Option<&[u8]> {
-        if self.hwaddr.is_null() { return None }
+        if self.hwaddr.is_null() {
+            return None;
+        }
         unsafe {
             let len = be16_to_cpu((*self.hwaddr).hw_addrlen) as usize;
             Some(&(*self.hwaddr).hw_addr[..len])
@@ -336,8 +368,7 @@ impl Message {
     #[inline]
     pub fn get_payload(&self) -> &[u8] {
         match self.payload_state {
-            PayloadState::Unmodified |
-            PayloadState::Modified => self.payload,
+            PayloadState::Unmodified | PayloadState::Modified => self.payload,
             PayloadState::Owned(ref vec) => &vec,
         }
     }
@@ -460,7 +491,9 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
         NFQA_UID => message.uid = Some(nla::get_u32(attr)),
         NFQA_GID => message.gid = Some(nla::get_u32(attr)),
         NFQA_TIMESTAMP => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_timestamp>());
+            assert!(
+                nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_timestamp>()
+            );
             message.timestamp = nla::get_payload(attr);
         }
         NFQA_PACKET_HDR => {
@@ -472,19 +505,29 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
             // We actually own this message (even though the buffer is shared via a Arc, we know
             // that no other messages are overlapping, so it's safe to mutate it)
             let payload = nla::get_payload::<u8>(attr) as *mut u8;
-            message.payload = std::slice::from_raw_parts_mut(payload as *const u8 as *mut u8, len as usize);
+            message.payload =
+                std::slice::from_raw_parts_mut(payload as *const u8 as *mut u8, len as usize);
         }
         NFQA_CT => {
             // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
             // init should be good enough.
-            if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
+            if message.ct.is_none() {
+                message.ct = Some(std::mem::zeroed())
+            }
             let ct = message.ct.as_mut().unwrap();
-            for attr in (AttrStream { buf: std::slice::from_raw_parts(nla::get_payload(attr), (nla::get_payload_len(attr) + 3) / 4) }) {
+            for attr in (AttrStream {
+                buf: std::slice::from_raw_parts(
+                    nla::get_payload(attr),
+                    (nla::get_payload_len(attr) + 3) / 4,
+                ),
+            }) {
                 parse_ct_attr(attr, ct);
             }
         }
         NFQA_CT_INFO => {
-            if message.ct.is_none() { message.ct = Some(std::mem::zeroed()) }
+            if message.ct.is_none() {
+                message.ct = Some(std::mem::zeroed())
+            }
             message.ct.as_mut().unwrap().state = nla::get_u32(attr);
         }
         _ => (),
@@ -520,7 +563,9 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
         verdict: Verdict::Accept,
     };
 
-    for attr in (AttrStream { buf: std::slice::from_raw_parts(attr_start, (attr_len + 3) / 4) }) {
+    for attr in (AttrStream {
+        buf: std::slice::from_raw_parts(attr_start, (attr_len + 3) / 4),
+    }) {
         parse_attr(attr, &mut message);
     }
 
@@ -568,7 +613,14 @@ impl Queue {
 
         let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
         addr.nl_family = AF_NETLINK as _;
-        if unsafe { bind(fd, &addr as *const sockaddr_nl as _, std::mem::size_of_val(&addr) as _) } < 0 {
+        if unsafe {
+            bind(
+                fd,
+                &addr as *const sockaddr_nl as _,
+                std::mem::size_of_val(&addr) as _,
+            )
+        } < 0
+        {
             return Err(std::io::Error::last_os_error());
         }
 
@@ -581,10 +633,16 @@ impl Queue {
     /// this off by default.
     pub fn set_recv_enobufs(&mut self, enable: bool) -> std::io::Result<()> {
         let val = (!enable) as c_int;
-        if unsafe { setsockopt(
-                self.fd, SOL_NETLINK, NETLINK_NO_ENOBUFS,
-                &val as *const c_int as _, std::mem::size_of_val(&val) as _
-        ) } < 0 {
+        if unsafe {
+            setsockopt(
+                self.fd,
+                SOL_NETLINK,
+                NETLINK_NO_ENOBUFS,
+                &val as *const c_int as _,
+                std::mem::size_of_val(&val) as _,
+            )
+        } < 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -597,9 +655,13 @@ impl Queue {
         addr.nl_family = AF_NETLINK as _;
         if sendto(
             self.fd,
-            nlh as _, (*nlh).nlmsg_len as _, 0,
-            &addr as *const sockaddr_nl as _, std::mem::size_of_val(&addr) as _
-        ) < 0 {
+            nlh as _,
+            (*nlh).nlmsg_len as _,
+            0,
+            &addr as *const sockaddr_nl as _,
+            std::mem::size_of_val(&addr) as _,
+        ) < 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -632,7 +694,10 @@ impl Queue {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 });
+            nlmsg.put_u32(
+                NFQA_CFG_FLAGS as u16,
+                if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 },
+            );
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
             self.send_nlmsg(nlmsg)?;
             self.recv_error()
@@ -645,7 +710,10 @@ impl Queue {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_GSO } else { 0 });
+            nlmsg.put_u32(
+                NFQA_CFG_FLAGS as u16,
+                if enabled { NFQA_CFG_F_GSO } else { 0 },
+            );
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
             self.send_nlmsg(nlmsg)?;
             self.recv_error()
@@ -658,7 +726,10 @@ impl Queue {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_UID_GID } else { 0 });
+            nlmsg.put_u32(
+                NFQA_CFG_FLAGS as u16,
+                if enabled { NFQA_CFG_F_UID_GID } else { 0 },
+            );
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
             self.send_nlmsg(nlmsg)?;
             self.recv_error()
@@ -671,7 +742,10 @@ impl Queue {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_SECCTX } else { 0 });
+            nlmsg.put_u32(
+                NFQA_CFG_FLAGS as u16,
+                if enabled { NFQA_CFG_F_SECCTX } else { 0 },
+            );
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
             self.send_nlmsg(nlmsg)?;
             self.recv_error()
@@ -685,7 +759,10 @@ impl Queue {
             let mut buf = [0u32; 8192 / 4];
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_FLAGS as u16, if enabled { NFQA_CFG_F_CONNTRACK } else { 0 });
+            nlmsg.put_u32(
+                NFQA_CFG_FLAGS as u16,
+                if enabled { NFQA_CFG_F_CONNTRACK } else { 0 },
+            );
             nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
             self.send_nlmsg(nlmsg)?;
             self.recv_error()
@@ -704,7 +781,11 @@ impl Queue {
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             let params = nfqnl_msg_config_params {
                 copy_range: be32_to_cpu(range as u32),
-                copy_mode: if range == 0 { NFQNL_COPY_META } else { NFQNL_COPY_PACKET } as u8,
+                copy_mode: if range == 0 {
+                    NFQNL_COPY_META
+                } else {
+                    NFQNL_COPY_PACKET
+                } as u8,
             };
             nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
             self.send_nlmsg(nlmsg)?;
@@ -775,9 +856,13 @@ impl Queue {
 
         let mut nlh = buf.as_ptr() as *const nlmsghdr;
         loop {
-            if size < NLMSG_HDRLEN { break }
+            if size < NLMSG_HDRLEN {
+                break;
+            }
             let nlmsg_len = unsafe { (*nlh).nlmsg_len } as usize;
-            if size < nlmsg_len { break }
+            if size < nlmsg_len {
+                break;
+            }
 
             if unsafe { (*nlh).nlmsg_flags } & NLM_F_DUMP_INTR as u16 != 0 {
                 return Err(std::io::Error::from_raw_os_error(EINTR));
@@ -789,7 +874,9 @@ impl Queue {
                     assert!(nlmsg_len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
                     let err = (nlh as usize + NLMSG_HDRLEN) as *const nlmsgerr;
                     let errno = unsafe { (*err).error }.abs();
-                    if errno == 0 { return Ok(true) }
+                    if errno == 0 {
+                        return Ok(true);
+                    }
                     return Err(std::io::Error::from_raw_os_error(errno));
                 }
                 NLMSG_DONE => return Ok(true),
@@ -848,7 +935,8 @@ impl Queue {
             if msg.nfmark_dirty {
                 nlmsg.put_u32(NFQA_MARK as u16, msg.nfmark);
             }
-            if let PayloadState::Unmodified = msg.payload_state {} else {
+            if let PayloadState::Unmodified = msg.payload_state {
+            } else {
                 if msg.verdict != Verdict::Drop {
                     let payload = msg.get_payload();
                     nlmsg.put_slice(NFQA_PAYLOAD as u16, payload);
