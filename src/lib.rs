@@ -364,6 +364,12 @@ impl Message {
         unsafe { (*self.hdr).hook }
     }
 
+    /// Get packet ID that netfilter uses to track the packet.
+    #[inline]
+    pub fn get_packet_id(&self) -> u32 {
+        unsafe { be32_to_cpu((*self.hdr).packet_id) }
+    }
+
     /// Get the content of the payload.
     #[inline]
     pub fn get_payload(&self) -> &[u8] {
