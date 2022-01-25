@@ -33,7 +33,8 @@ use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
     socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC,
     NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
-    NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOCK_NONBLOCK, SOL_NETLINK,
+    _SC_PAGE_SIZE,
 };
 use std::collections::VecDeque;
 use std::io::Result;
@@ -597,13 +598,7 @@ pub struct Queue {
 unsafe impl Send for Queue {}
 
 impl Queue {
-    /// Open a NetFilter socket and queue connection.
-    pub fn open() -> std::io::Result<Queue> {
-        let fd = unsafe { socket(PF_NETLINK, SOCK_RAW, NETLINK_NETFILTER) };
-        if fd == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-
+    fn set_up_queue(fd: i32) -> std::io::Result<Queue>  {
         let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
 
         let mut queue = Queue {
@@ -630,6 +625,27 @@ impl Queue {
 
         queue.set_recv_enobufs(false)?;
         Ok(queue)
+
+    }
+
+    /// Open a NetFilter socket and queue connection in nonblocking mode.
+    pub fn open_nonblocking() -> std::io::Result<Queue>  {
+        let fd = unsafe { socket(PF_NETLINK, SOCK_RAW | SOCK_NONBLOCK, NETLINK_NETFILTER) };
+        if fd == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Queue::set_up_queue(fd)
+    }
+
+    /// Open a NetFilter socket and queue connection.
+    pub fn open() -> std::io::Result<Queue> {
+        let fd = unsafe { socket(PF_NETLINK, SOCK_RAW, NETLINK_NETFILTER) };
+        if fd == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Queue::set_up_queue(fd)
     }
 
     /// Change whether ENOBUFS should be received by the application if the kernel queue is full.
