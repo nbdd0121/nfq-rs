@@ -352,6 +352,12 @@ impl Message {
         }
     }
 
+    /// Get the packet ID that netfilter uses to track the packet.
+    #[inline]
+    pub fn get_packet_id(&self) -> u32 {
+        unsafe { be32_to_cpu((*self.hdr).packet_id) }
+    }
+
     /// Get the link layer protocol number, e.g. the EtherType field on Ethernet links.
     #[inline]
     pub fn get_hw_protocol(&self) -> u16 {
@@ -362,12 +368,6 @@ impl Message {
     #[inline]
     pub fn get_hook(&self) -> u8 {
         unsafe { (*self.hdr).hook }
-    }
-
-    /// Get the packet ID that netfilter uses to track the packet.
-    #[inline]
-    pub fn get_packet_id(&self) -> u32 {
-        unsafe { be32_to_cpu((*self.hdr).packet_id) }
     }
 
     /// Get the content of the payload.
