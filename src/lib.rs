@@ -232,6 +232,7 @@ pub struct Message {
 }
 
 unsafe impl Send for Message {}
+unsafe impl Sync for Message {}
 
 impl Message {
     /// Get the queue number.
@@ -599,8 +600,6 @@ pub struct Queue {
     /// Message buffer reused across verdict calls
     verdict_buffer: Option<Box<[u32; (8192 + 0x10000) / 4]>>,
 }
-
-unsafe impl Send for Queue {}
 
 impl Queue {
     /// Open a NetFilter socket and queue connection.
@@ -975,4 +974,11 @@ impl Drop for Queue {
     fn drop(&mut self) {
         unsafe { close(self.fd) };
     }
+}
+
+fn _assert_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+
+    check::<Message>();
+    check::<Queue>();
 }
