@@ -37,6 +37,7 @@ use libc::{
 };
 use std::collections::VecDeque;
 use std::io::Result;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -584,7 +585,7 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 /// A NetFilter queue.
 pub struct Queue {
     /// NetLink socket
-    fd: libc::c_int,
+    fd: RawFd,
     /// Flag to send for recv operation. Decides whether or not the operation blocks until there is
     /// message from the kernel.
     recv_flag: libc::c_int,
@@ -973,6 +974,12 @@ impl Queue {
 impl Drop for Queue {
     fn drop(&mut self) {
         unsafe { close(self.fd) };
+    }
+}
+
+impl AsRawFd for Queue {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
     }
 }
 
