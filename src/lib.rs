@@ -26,18 +26,27 @@
 //! }
 //! ```
 
-mod binding;
 mod nlmsg;
 
-use binding::*;
 use bytes::BytesMut;
 use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
     socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC,
-    NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
+    NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NFNETLINK_V0, NFNL_SUBSYS_QUEUE, NFQA_CAP_LEN,
+    NFQA_CFG_CMD, NFQA_CFG_FLAGS, NFQA_CFG_F_CONNTRACK, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_GSO,
+    NFQA_CFG_F_SECCTX, NFQA_CFG_F_UID_GID, NFQA_CFG_MASK, NFQA_CFG_PARAMS, NFQA_CFG_QUEUE_MAXLEN,
+    NFQA_CT, NFQA_CT_INFO, NFQA_GID, NFQA_HWADDR, NFQA_IFINDEX_INDEV, NFQA_IFINDEX_OUTDEV,
+    NFQA_IFINDEX_PHYSINDEV, NFQA_IFINDEX_PHYSOUTDEV, NFQA_MARK, NFQA_PACKET_HDR, NFQA_PAYLOAD,
+    NFQA_SECCTX, NFQA_SKB_CSUMNOTREADY, NFQA_SKB_GSO, NFQA_SKB_INFO, NFQA_TIMESTAMP, NFQA_UID,
+    NFQA_VERDICT_HDR, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, NFQNL_COPY_META, NFQNL_COPY_PACKET,
+    NFQNL_MSG_CONFIG, NFQNL_MSG_VERDICT, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
     NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
-use nlmsg::{NfGenMsg, NlmsgMut};
+use nlmsg::{
+    NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlmsgMut, CTA_ID,
+    IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY, IP_CT_RELATED,
+    IP_CT_RELATED_REPLY,
+};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -150,13 +159,13 @@ pub struct Message {
     physindev: u32,
     physoutdev: u32,
     orig_len: u32,
-    skbinfo: u32,
+    skbinfo: i32,
     secctx: *const libc::c_char,
     uid: Option<u32>,
     gid: Option<u32>,
-    timestamp: *const nfqnl_msg_packet_timestamp,
-    hwaddr: *const nfqnl_msg_packet_hw,
-    hdr: *const nfqnl_msg_packet_hdr,
+    timestamp: *const NfqNlMsgPacketTimestamp,
+    hwaddr: *const NfqNlMsgPacketHw,
+    hdr: *const NfqNlMsgPacketHdr,
     // conntrack data
     ct: Option<Conntrack>,
     // The actual lifetime is 'buffer
@@ -440,7 +449,7 @@ unsafe fn parse_ct_attr(attr: *const nlattr, ct: &mut Conntrack) {
 }
 
 unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
-    let typ = nla::get_type(attr) as c_uint;
+    let typ = nla::get_type(attr) as c_int;
     match typ {
         NFQA_MARK => message.nfmark = nla::get_u32(attr),
         NFQA_IFINDEX_INDEV => message.indev = nla::get_u32(attr),
@@ -448,22 +457,20 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
         NFQA_IFINDEX_PHYSINDEV => message.physindev = nla::get_u32(attr),
         NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = nla::get_u32(attr),
         NFQA_HWADDR => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_hw>());
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketHw>());
             message.hwaddr = nla::get_payload(attr);
         }
         NFQA_CAP_LEN => message.orig_len = nla::get_u32(attr),
-        NFQA_SKB_INFO => message.skbinfo = nla::get_u32(attr),
+        NFQA_SKB_INFO => message.skbinfo = nla::get_u32(attr) as i32,
         NFQA_SECCTX => message.secctx = nla::get_payload(attr),
         NFQA_UID => message.uid = Some(nla::get_u32(attr)),
         NFQA_GID => message.gid = Some(nla::get_u32(attr)),
         NFQA_TIMESTAMP => {
-            assert!(
-                nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_timestamp>()
-            );
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketTimestamp>());
             message.timestamp = nla::get_payload(attr);
         }
         NFQA_PACKET_HDR => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<nfqnl_msg_packet_hdr>());
+            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketHdr>());
             message.hdr = nla::get_payload(attr);
         }
         NFQA_PAYLOAD => {
@@ -501,8 +508,8 @@ unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
 }
 
 unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
-    const NFGEN_HDRLEN: usize = nfq_align(std::mem::size_of::<nfgenmsg>());
-    let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const nfgenmsg;
+    const NFGEN_HDRLEN: usize = nfq_align(std::mem::size_of::<NfGenMsg>());
+    let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const NfGenMsg;
     let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
     let attr_len = (*nlh).nlmsg_len as usize - NLMSG_HDRLEN - NFGEN_HDRLEN;
 
@@ -663,9 +670,13 @@ impl Queue {
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
-            if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 },
+            if enabled {
+                NFQA_CFG_F_FAIL_OPEN as u32
+            } else {
+                0
+            },
         );
-        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN as u32);
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()
     }
@@ -676,9 +687,9 @@ impl Queue {
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
-            if enabled { NFQA_CFG_F_GSO } else { 0 },
+            if enabled { NFQA_CFG_F_GSO as u32 } else { 0 },
         );
-        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO as u32);
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()
     }
@@ -689,9 +700,13 @@ impl Queue {
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
-            if enabled { NFQA_CFG_F_UID_GID } else { 0 },
+            if enabled {
+                NFQA_CFG_F_UID_GID as u32
+            } else {
+                0
+            },
         );
-        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID as u32);
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()
     }
@@ -702,9 +717,9 @@ impl Queue {
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
-            if enabled { NFQA_CFG_F_SECCTX } else { 0 },
+            if enabled { NFQA_CFG_F_SECCTX as u32 } else { 0 },
         );
-        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX as u32);
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()
     }
@@ -716,9 +731,13 @@ impl Queue {
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
-            if enabled { NFQA_CFG_F_CONNTRACK } else { 0 },
+            if enabled {
+                NFQA_CFG_F_CONNTRACK as u32
+            } else {
+                0
+            },
         );
-        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK as u32);
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()
     }
@@ -740,7 +759,6 @@ impl Queue {
                 } else {
                     NFQNL_COPY_PACKET
                 } as u8,
-                padding: [0; 3],
             },
         );
         self.send_nlmsg(&nlmsg.finish())?;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use bytes::{BufMut, BytesMut};
 
@@ -5,6 +7,19 @@ use bytes::{BufMut, BytesMut};
 type be16 = u16;
 #[allow(non_camel_case_types)]
 type be32 = u32;
+#[allow(non_camel_case_types)]
+type be64 = u64;
+
+pub const IP_CT_ESTABLISHED: u32 = 0;
+pub const IP_CT_RELATED: u32 = 1;
+pub const IP_CT_NEW: u32 = 2;
+pub const IP_CT_IS_REPLY: u32 = 3;
+pub const IP_CT_ESTABLISHED_REPLY: u32 = 3;
+pub const IP_CT_RELATED_REPLY: u32 = 4;
+pub const IP_CT_NUMBER: u32 = 5;
+pub const IP_CT_NEW_REPLY: u32 = 5;
+
+pub const CTA_ID: u32 = 12;
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
@@ -46,12 +61,31 @@ pub struct NfqNlMsgVerdictHdr {
     pub id: be32,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Zeroable, Pod)]
 pub struct NfqNlMsgConfigParams {
     pub copy_range: be32,
     pub copy_mode: u8,
-    pub padding: [u8; 3],
+}
+
+#[repr(C, packed)]
+pub struct NfqNlMsgPacketHdr {
+    pub packet_id: be32,
+    pub hw_protocol: be16,
+    pub hook: u8,
+}
+
+#[repr(C)]
+pub struct NfqNlMsgPacketHw {
+    pub hw_addrlen: be16,
+    pub padding: [u8; 2],
+    pub hw_addr: [u8; 8],
+}
+
+#[repr(C)]
+pub struct NfqNlMsgPacketTimestamp {
+    pub sec: be64,
+    pub usec: be64,
 }
 
 pub struct NlmsgMut(BytesMut);
