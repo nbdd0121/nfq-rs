@@ -142,9 +142,6 @@ impl core::fmt::Debug for Message {
     }
 }
 
-unsafe impl Send for Message {}
-unsafe impl Sync for Message {}
-
 impl Message {
     /// Get the queue number.
     #[inline]
@@ -488,6 +485,12 @@ pub struct Queue {
     verdict_buffer: BytesMut,
 }
 
+#[inline]
+fn metadata_size() -> usize {
+    // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
+    core::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as _ }, 8192)
+}
+
 impl Queue {
     /// Open a NetFilter socket and queue connection.
     pub fn open() -> std::io::Result<Queue> {
@@ -496,8 +499,7 @@ impl Queue {
             return Err(std::io::Error::last_os_error());
         }
 
-        let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
-
+        let metadata_size = metadata_size();
         let mut queue = Queue {
             fd,
             recv_flag: 0,
@@ -567,7 +569,7 @@ impl Queue {
     /// This method will set the copy range to 65535 by default. It can be changed by using
     /// [`set_copy_range`](#method.set_copy_range).
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put(
             NFQA_CFG_CMD as u16,
@@ -585,7 +587,7 @@ impl Queue {
 
     /// Set whether the kernel should drop or accept a packet if the queue is full.
     pub fn set_fail_open(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
@@ -602,7 +604,7 @@ impl Queue {
 
     /// Set whether we should receive GSO-enabled and partial checksum packets.
     pub fn set_recv_gso(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
@@ -615,7 +617,7 @@ impl Queue {
 
     /// Set whether we should receive UID/GID along with packets.
     pub fn set_recv_uid_gid(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
@@ -632,7 +634,7 @@ impl Queue {
 
     /// Set whether we should receive security context strings along with packets.
     pub fn set_recv_security_context(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
@@ -646,7 +648,7 @@ impl Queue {
     /// Set whether we should receive connteack information along with packets.
     #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(
             NFQA_CFG_FLAGS as u16,
@@ -667,7 +669,7 @@ impl Queue {
     /// To get the original length of truncated packet, use
     /// [`Message::get_original_len`](struct.Message.html#method.get_original_len).
     pub fn set_copy_range(&mut self, queue_num: u16, range: u16) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put(
             NFQA_CFG_PARAMS as u16,
@@ -683,17 +685,14 @@ impl Queue {
         self.send_nlmsg(&nlmsg.finish())?;
         self.recv_error()?;
 
-        // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
-        let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
-
-        self.bufsize = metadata_size + range as usize;
+        self.bufsize = metadata_size() + range as usize;
         Ok(())
     }
 
     /// Set the maximum kernel queue length. If the application cannot [`recv`](#method.recv) fast
     /// enough, newly queued packet will be dropped (or accepted if fail open is enabled).
     pub fn set_queue_max_len(&mut self, queue_num: u16, len: u32) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put_be32(NFQA_CFG_QUEUE_MAXLEN as u16, len);
         self.send_nlmsg(&nlmsg.finish())?;
@@ -707,7 +706,7 @@ impl Queue {
 
     /// Unbind from a specific queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
-        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
         nlmsg.put(
             NFQA_CFG_CMD as u16,
