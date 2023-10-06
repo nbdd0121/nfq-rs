@@ -27,14 +27,17 @@
 //! ```
 
 mod binding;
+mod nlmsg;
 
 use binding::*;
+use bytes::BytesMut;
 use libc::{
     bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
     socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC,
     NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
     NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
+use nlmsg::{NfGenMsg, NlmsgMut};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -63,15 +66,14 @@ pub enum Verdict {
     Stop,
 }
 
-// Messages are expected to be 32-bit aligned, so we take a [u32] as buffer instead [u8].
-unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16, ack: bool) {
-    let nlh = nlmsg.as_hdr();
-    (*nlh).nlmsg_type = ((NFNL_SUBSYS_QUEUE as u16) << 8) | typ;
-    (*nlh).nlmsg_flags = (NLM_F_REQUEST | if ack { NLM_F_ACK } else { 0 }) as u16;
-    let nfg: *mut nfgenmsg = nlmsg.extra_header();
-    (*nfg).nfgen_family = AF_UNSPEC as u8;
-    (*nfg).version = NFNETLINK_V0 as u8;
-    (*nfg).res_id = queue_num.to_be();
+fn nfq_hdr_put(nlmsg: &mut NlmsgMut, typ: u16, queue_num: u16, ack: bool) {
+    let nlh = nlmsg.as_header_mut();
+    nlh.ty = ((NFNL_SUBSYS_QUEUE as u16) << 8) | typ;
+    nlh.flags = (NLM_F_REQUEST | if ack { NLM_F_ACK } else { 0 }) as u16;
+    let nfg: &mut NfGenMsg = nlmsg.extra_header();
+    nfg.family = AF_UNSPEC as u8;
+    nfg.version = NFNETLINK_V0 as u8;
+    nfg.res_id = queue_num.to_be();
 }
 
 /// Helper functions for parsing `nlattr`. We do this ourselves instead of using libmnl to avoid
@@ -125,64 +127,6 @@ impl<'a> Iterator for AttrStream<'a> {
 
         self.buf = &self.buf[(nla_len + 3) / 4..];
         Some(attr)
-    }
-}
-
-struct Nlmsg<'a> {
-    buf: &'a mut [u32],
-    len: usize,
-}
-
-impl<'a> Nlmsg<'a> {
-    unsafe fn new(buf: &'a mut [u32]) -> Self {
-        // First clear all of the header
-        let hdrlen = (std::mem::size_of::<nlmsghdr>() + 3) / 4;
-        std::ptr::write_bytes(buf.as_mut_ptr(), 0, hdrlen);
-        Self { buf, len: hdrlen }
-    }
-
-    /// Allocate and zero for an extra header
-    fn extra_header<T>(&mut self) -> *mut T {
-        let len = (std::mem::size_of::<T>() + 3) / 4;
-        let ptr = unsafe { self.buf.as_mut_ptr().add(self.len) };
-        self.len += len;
-        assert!(self.len <= self.buf.len());
-        unsafe { std::ptr::write_bytes(ptr, 0, len) };
-        ptr as _
-    }
-
-    /// Put an attribute
-    fn put_raw(&mut self, typ: u16, len: usize) -> *mut u32 {
-        let nla_len = len + std::mem::size_of::<nlattr>();
-        let attr: *mut nlattr = unsafe { self.buf.as_mut_ptr().add(self.len) as _ };
-        self.len += (nla_len + 3) / 4;
-        assert!(self.len <= self.buf.len());
-        unsafe {
-            (*attr).nla_type = typ;
-            (*attr).nla_len = nla_len as _;
-            nla::get_payload::<u32>(attr) as *mut u32
-        }
-    }
-
-    /// Put a slice of arbitary data. This is safe as it copies its memory representation only.
-    fn put_slice<T>(&mut self, typ: u16, value: &[T]) {
-        let ptr = self.put_raw(typ, value.len() * std::mem::size_of::<T>());
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), ptr as _, value.len()) };
-    }
-
-    /// Put an u32 attribute, convert to big endian
-    fn put_u32(&mut self, typ: u16, data: u32) {
-        let ptr = self.put_raw(typ, 4);
-        unsafe { *ptr = data.to_be() };
-    }
-
-    fn as_hdr(&mut self) -> *mut nlmsghdr {
-        self.buf.as_mut_ptr() as _
-    }
-
-    unsafe fn adjust_len(&mut self) {
-        let hdr = self.as_hdr();
-        (*hdr).nlmsg_len = (self.len * 4) as _;
     }
 }
 
@@ -612,8 +556,9 @@ pub struct Queue {
     /// We can receive multiple messages from kernel in a single recv, so we keep a queue
     /// internally before everything is consumed.
     queue: VecDeque<Message>,
+
     /// Message buffer reused across verdict calls
-    verdict_buffer: Option<Box<[u32; (8192 + 0x10000) / 4]>>,
+    verdict_buffer: BytesMut,
 }
 
 impl Queue {
@@ -632,7 +577,7 @@ impl Queue {
             bufsize: metadata_size,
             buffer: Arc::new(Vec::with_capacity(metadata_size)),
             queue: VecDeque::new(),
-            verdict_buffer: Some(Box::new(unsafe { std::mem::zeroed() })),
+            verdict_buffer: BytesMut::with_capacity(metadata_size + 65536),
         };
 
         let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
@@ -672,21 +617,21 @@ impl Queue {
         Ok(())
     }
 
-    unsafe fn send_nlmsg(&self, mut nlh: Nlmsg) -> std::io::Result<()> {
-        nlh.adjust_len();
-        let nlh = nlh.as_hdr();
-        let mut addr: sockaddr_nl = std::mem::zeroed();
-        addr.nl_family = AF_NETLINK as _;
-        if sendto(
-            self.fd,
-            nlh as _,
-            (*nlh).nlmsg_len as _,
-            0,
-            &addr as *const sockaddr_nl as _,
-            std::mem::size_of_val(&addr) as _,
-        ) < 0
-        {
-            return Err(std::io::Error::last_os_error());
+    fn send_nlmsg(&self, nlmsg: &[u8]) -> std::io::Result<()> {
+        unsafe {
+            let mut addr: sockaddr_nl = std::mem::zeroed();
+            addr.nl_family = AF_NETLINK as _;
+            if sendto(
+                self.fd,
+                nlmsg.as_ptr() as _,
+                nlmsg.len() as _,
+                0,
+                &addr as *const sockaddr_nl as _,
+                std::mem::size_of_val(&addr) as _,
+            ) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
         }
         Ok(())
     }
@@ -696,101 +641,86 @@ impl Queue {
     /// This method will set the copy range to 65535 by default. It can be changed by using
     /// [`set_copy_range`](#method.set_copy_range).
     pub fn bind(&mut self, queue_num: u16) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            let command = nfqnl_msg_config_cmd {
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put(
+            NFQA_CFG_CMD as u16,
+            &nlmsg::NfqNlMsgConfigCmd {
                 command: NFQNL_CFG_CMD_BIND as u8,
+                padding: 0,
                 pf: 0,
-                _pad: 0,
-            };
-            nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()?;
-        }
+            },
+        );
+
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()?;
         self.set_copy_range(queue_num, 65535)
     }
 
     /// Set whether the kernel should drop or accept a packet if the queue is full.
     pub fn set_fail_open(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(
-                NFQA_CFG_FLAGS as u16,
-                if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 },
-            );
-            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(
+            NFQA_CFG_FLAGS as u16,
+            if enabled { NFQA_CFG_F_FAIL_OPEN } else { 0 },
+        );
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_FAIL_OPEN);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set whether we should receive GSO-enabled and partial checksum packets.
     pub fn set_recv_gso(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(
-                NFQA_CFG_FLAGS as u16,
-                if enabled { NFQA_CFG_F_GSO } else { 0 },
-            );
-            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(
+            NFQA_CFG_FLAGS as u16,
+            if enabled { NFQA_CFG_F_GSO } else { 0 },
+        );
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_GSO);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set whether we should receive UID/GID along with packets.
     pub fn set_recv_uid_gid(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(
-                NFQA_CFG_FLAGS as u16,
-                if enabled { NFQA_CFG_F_UID_GID } else { 0 },
-            );
-            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(
+            NFQA_CFG_FLAGS as u16,
+            if enabled { NFQA_CFG_F_UID_GID } else { 0 },
+        );
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_UID_GID);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set whether we should receive security context strings along with packets.
     pub fn set_recv_security_context(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(
-                NFQA_CFG_FLAGS as u16,
-                if enabled { NFQA_CFG_F_SECCTX } else { 0 },
-            );
-            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(
+            NFQA_CFG_FLAGS as u16,
+            if enabled { NFQA_CFG_F_SECCTX } else { 0 },
+        );
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_SECCTX);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set whether we should receive connteack information along with packets.
     #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(
-                NFQA_CFG_FLAGS as u16,
-                if enabled { NFQA_CFG_F_CONNTRACK } else { 0 },
-            );
-            nlmsg.put_u32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(
+            NFQA_CFG_FLAGS as u16,
+            if enabled { NFQA_CFG_F_CONNTRACK } else { 0 },
+        );
+        nlmsg.put_be32(NFQA_CFG_MASK as u16, NFQA_CFG_F_CONNTRACK);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set copy range. Packet larger than the specified range will be truncated. If the range
@@ -799,22 +729,22 @@ impl Queue {
     /// To get the original length of truncated packet, use
     /// [`Message::get_original_len`](struct.Message.html#method.get_original_len).
     pub fn set_copy_range(&mut self, queue_num: u16, range: u16) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            let params = nfqnl_msg_config_params {
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put(
+            NFQA_CFG_PARAMS as u16,
+            &nlmsg::NfqNlMsgConfigParams {
                 copy_range: (range as u32).to_be(),
                 copy_mode: if range == 0 {
                     NFQNL_COPY_META
                 } else {
                     NFQNL_COPY_PACKET
                 } as u8,
-            };
-            nlmsg.put_slice(NFQA_CFG_PARAMS as u16, std::slice::from_ref(&params));
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()?;
-        }
+                padding: [0; 3],
+            },
+        );
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()?;
 
         // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
         let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
@@ -827,14 +757,11 @@ impl Queue {
     /// Set the maximum kernel queue length. If the application cannot [`recv`](#method.recv) fast
     /// enough, newly queued packet will be dropped (or accepted if fail open is enabled).
     pub fn set_queue_max_len(&mut self, queue_num: u16, len: u32) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            nlmsg.put_u32(NFQA_CFG_QUEUE_MAXLEN as u16, len);
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put_be32(NFQA_CFG_QUEUE_MAXLEN as u16, len);
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     /// Set whether the recv function blocks or not
@@ -844,19 +771,18 @@ impl Queue {
 
     /// Unbind from a specific queue number.
     pub fn unbind(&mut self, queue_num: u16) -> Result<()> {
-        unsafe {
-            let mut buf = [0u32; 8192 / 4];
-            let mut nlmsg = Nlmsg::new(&mut buf);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
-            let command = nfqnl_msg_config_cmd {
+        let mut nlmsg = nlmsg::NlmsgMut::with_capacity(8192);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
+        nlmsg.put(
+            NFQA_CFG_CMD as u16,
+            &nlmsg::NfqNlMsgConfigCmd {
                 command: NFQNL_CFG_CMD_UNBIND as u8,
+                padding: 0,
                 pf: 0,
-                _pad: 0,
-            };
-            nlmsg.put_slice(NFQA_CFG_CMD as u16, std::slice::from_ref(&command));
-            self.send_nlmsg(nlmsg)?;
-            self.recv_error()
-        }
+            },
+        );
+        self.send_nlmsg(&nlmsg.finish())?;
+        self.recv_error()
     }
 
     // Receive an nlmsg, using callback to process them. If Ok(true) is returned it means we got an
@@ -953,36 +879,35 @@ impl Queue {
 
     /// Verdict a message.
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
-        unsafe {
-            let mut buffer = self.verdict_buffer.take().unwrap();
-            let mut nlmsg = Nlmsg::new(&mut buffer[..]);
-            nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, msg.id, false);
-            let vh = nfqnl_msg_verdict_hdr {
-                verdict: (match msg.verdict {
-                    Verdict::Drop => 0,
-                    Verdict::Accept => 1,
-                    Verdict::Queue(num) => (num as u32) << 16 | 3,
-                    Verdict::Repeat => 4,
-                    Verdict::Stop => 5,
-                })
-                .to_be(),
-                id: (*msg.hdr).packet_id,
-            };
-            nlmsg.put_slice(NFQA_VERDICT_HDR as u16, std::slice::from_ref(&vh));
-            if msg.nfmark_dirty {
-                nlmsg.put_u32(NFQA_MARK as u16, msg.nfmark);
-            }
-            if let PayloadState::Unmodified = msg.payload_state {
-            } else {
-                if msg.verdict != Verdict::Drop {
-                    let payload = msg.get_payload();
-                    nlmsg.put_slice(NFQA_PAYLOAD as u16, payload);
-                }
-            }
-            let ret = self.send_nlmsg(nlmsg);
-            self.verdict_buffer = Some(buffer);
-            ret
+        let buffer = core::mem::take(&mut self.verdict_buffer);
+        let mut nlmsg = NlmsgMut::new(buffer);
+        nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, msg.id, false);
+        let vh = nlmsg::NfqNlMsgVerdictHdr {
+            verdict: (match msg.verdict {
+                Verdict::Drop => 0,
+                Verdict::Accept => 1,
+                Verdict::Queue(num) => (num as u32) << 16 | 3,
+                Verdict::Repeat => 4,
+                Verdict::Stop => 5,
+            })
+            .to_be(),
+            id: unsafe { (*msg.hdr).packet_id },
+        };
+        nlmsg.put(NFQA_VERDICT_HDR as u16, &vh);
+        if msg.nfmark_dirty {
+            nlmsg.put_be32(NFQA_MARK as u16, msg.nfmark);
         }
+        if let PayloadState::Unmodified = msg.payload_state {
+        } else {
+            if msg.verdict != Verdict::Drop {
+                let payload = msg.get_payload();
+                nlmsg.put_bytes(NFQA_PAYLOAD as u16, payload);
+            }
+        }
+        let buffer = nlmsg.finish();
+        let ret = self.send_nlmsg(&buffer);
+        self.verdict_buffer = buffer;
+        ret
     }
 }
 

@@ -11,6 +11,8 @@ repository = "https://github.com/nbdd0121/nfq-rs.git"
 
 [dependencies]
 libc = "0.2"
+bytes = "1.5"
+bytemuck = { version = "1.14", features = ["derive"] }
 
 [features]
 ct = []
