@@ -31,7 +31,7 @@ mod nlmsg;
 use bytemuck::Zeroable;
 use bytes::{Buf, Bytes, BytesMut};
 use libc::{
-    bind, c_int, close, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf,
+    bind, c_int, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf,
     AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC, NETLINK_NETFILTER,
     NETLINK_NO_ENOBUFS, NFNETLINK_V0, NFNL_SUBSYS_QUEUE, NFQA_CAP_LEN, NFQA_CFG_CMD,
     NFQA_CFG_FLAGS, NFQA_CFG_F_CONNTRACK, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_GSO, NFQA_CFG_F_SECCTX,
@@ -50,7 +50,7 @@ use nlmsg::{
 };
 use std::collections::VecDeque;
 use std::io::Result;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, SystemTime};
 
 const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
@@ -471,7 +471,8 @@ fn parse_msg(mut bytes: BytesMut, queue: &mut Queue) {
 /// A NetFilter queue.
 pub struct Queue {
     /// NetLink socket
-    fd: RawFd,
+    fd: OwnedFd,
+
     /// Flag to send for recv operation. Decides whether or not the operation blocks until there is
     /// message from the kernel.
     recv_flag: libc::c_int,
@@ -498,6 +499,7 @@ impl Queue {
         if fd == -1 {
             return Err(std::io::Error::last_os_error());
         }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         let metadata_size = metadata_size();
         let mut queue = Queue {
@@ -512,7 +514,7 @@ impl Queue {
         addr.nl_family = AF_NETLINK as _;
         if unsafe {
             bind(
-                fd,
+                queue.fd.as_raw_fd(),
                 &addr as *const sockaddr_nl as _,
                 std::mem::size_of_val(&addr) as _,
             )
@@ -532,7 +534,7 @@ impl Queue {
         let val = (!enable) as c_int;
         if unsafe {
             setsockopt(
-                self.fd,
+                self.fd.as_raw_fd(),
                 SOL_NETLINK,
                 NETLINK_NO_ENOBUFS,
                 &val as *const c_int as _,
@@ -550,7 +552,7 @@ impl Queue {
             let mut addr: sockaddr_nl = std::mem::zeroed();
             addr.nl_family = AF_NETLINK as _;
             if sendto(
-                self.fd,
+                self.fd.as_raw_fd(),
                 nlmsg.as_ptr() as _,
                 nlmsg.len() as _,
                 0,
@@ -731,7 +733,7 @@ impl Queue {
 
         let size = unsafe {
             recv(
-                self.fd,
+                self.fd.as_raw_fd(),
                 buf.as_mut_ptr() as _,
                 buf.capacity(),
                 self.recv_flag | MSG_TRUNC,
@@ -840,15 +842,15 @@ impl Queue {
     }
 }
 
-impl Drop for Queue {
-    fn drop(&mut self) {
-        unsafe { close(self.fd) };
+impl AsRawFd for Queue {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
-impl AsRawFd for Queue {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
+impl AsFd for Queue {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 }
 
