@@ -31,7 +31,7 @@ mod nlmsg;
 use bytemuck::Zeroable;
 use bytes::{Buf, Bytes, BytesMut};
 use libc::{
-    bind, c_int, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf,
+    bind, c_int, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf,
     AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC, NETLINK_NETFILTER,
     NETLINK_NO_ENOBUFS, NFNETLINK_V0, NFNL_SUBSYS_QUEUE, NFQA_CAP_LEN, NFQA_CFG_CMD,
     NFQA_CFG_FLAGS, NFQA_CFG_F_CONNTRACK, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_GSO, NFQA_CFG_F_SECCTX,
@@ -43,22 +43,16 @@ use libc::{
     NFQNL_MSG_CONFIG, NFQNL_MSG_VERDICT, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK,
     NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
-use nlmsg::{
-    NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgHdr, NlmsgMut,
-    CTA_ID, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY, IP_CT_RELATED,
-    IP_CT_RELATED_REPLY,
-};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, SystemTime};
 
-const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
-
-/// Netlink messages pad to a 4 byte alignment between sections.
-const fn nfq_align(len: usize) -> usize {
-    (len + 3) & !3
-}
+use nlmsg::{
+    NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgErr, NlMsgHdr,
+    NlmsgMut, CTA_ID, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY,
+    IP_CT_RELATED, IP_CT_RELATED_REPLY,
+};
 
 /// Decision made on a specific packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,7 +754,7 @@ impl Queue {
                 break;
             }
 
-            let aligned_len = nfq_align(len);
+            let aligned_len = len.next_multiple_of(4);
             let mut msg_buf = buf.split_to(core::cmp::min(aligned_len, buf.len()));
             msg_buf.truncate(len);
 
@@ -771,9 +765,11 @@ impl Queue {
             let nlmsg_type = nlh.ty as c_int;
             match nlmsg_type {
                 NLMSG_ERROR => {
-                    assert!(len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
-                    let err = (msg_buf.as_ptr() as usize + NLMSG_HDRLEN) as *const nlmsgerr;
-                    let errno = unsafe { (*err).error }.abs();
+                    let err: &NlMsgErr = bytemuck::from_bytes(
+                        &msg_buf[core::mem::size_of::<NlMsgHdr>()..]
+                            [..core::mem::size_of::<NlMsgErr>()],
+                    );
+                    let errno = err.error.abs();
                     if errno == 0 {
                         return Ok(true);
                     }

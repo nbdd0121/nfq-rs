@@ -33,6 +33,13 @@ pub struct NlMsgHdr {
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
+pub struct NlMsgErr {
+    pub error: core::ffi::c_int,
+    pub msg: NlMsgHdr,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
 pub struct NlAttr {
     pub len: u16,
     pub ty: u16,
