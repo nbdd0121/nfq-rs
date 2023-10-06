@@ -350,11 +350,10 @@ impl Message {
         if self.timestamp.is_null() {
             return None;
         }
-        unsafe {
-            let duration = Duration::from_secs(u64::from_be((*self.timestamp).sec))
-                + Duration::from_micros(u64::from_be((*self.timestamp).usec));
-            Some(SystemTime::UNIX_EPOCH + duration)
-        }
+        let timestamp = unsafe { self.timestamp.read_unaligned() };
+        let duration = Duration::from_secs(u64::from_be(timestamp.sec))
+            + Duration::from_micros(u64::from_be(timestamp.usec));
+        Some(SystemTime::UNIX_EPOCH + duration)
     }
 
     /// Get the hardware address associated with the packet. For Ethernet packets, the hardware
