@@ -43,16 +43,6 @@ use std::time::{Duration, SystemTime};
 
 const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
 
-fn be16_to_cpu(x: u16) -> u16 {
-    u16::from_ne_bytes(x.to_be_bytes())
-}
-fn be32_to_cpu(x: u32) -> u32 {
-    u32::from_ne_bytes(x.to_be_bytes())
-}
-fn be64_to_cpu(x: u64) -> u64 {
-    u64::from_ne_bytes(x.to_be_bytes())
-}
-
 /// Netlink messages pad to a 4 byte alignment between sections.
 const fn nfq_align(len: usize) -> usize {
     (len + 3) & !3
@@ -81,7 +71,7 @@ unsafe fn nfq_hdr_put(nlmsg: &mut Nlmsg, typ: u16, queue_num: u16, ack: bool) {
     let nfg: *mut nfgenmsg = nlmsg.extra_header();
     (*nfg).nfgen_family = AF_UNSPEC as u8;
     (*nfg).version = NFNETLINK_V0 as u8;
-    (*nfg).res_id = be16_to_cpu(queue_num);
+    (*nfg).res_id = queue_num.to_be();
 }
 
 /// Helper functions for parsing `nlattr`. We do this ourselves instead of using libmnl to avoid
@@ -103,7 +93,7 @@ mod nla {
     /// Get u32 from payload and convert it to native endian
     #[inline]
     pub unsafe fn get_u32(attr: *const libc::nlattr) -> u32 {
-        super::be32_to_cpu(*get_payload(attr))
+        u32::from_be(*get_payload(attr))
     }
 }
 
@@ -183,7 +173,7 @@ impl<'a> Nlmsg<'a> {
     /// Put an u32 attribute, convert to big endian
     fn put_u32(&mut self, typ: u16, data: u32) {
         let ptr = self.put_raw(typ, 4);
-        unsafe { *ptr = be32_to_cpu(data) };
+        unsafe { *ptr = data.to_be() };
     }
 
     fn as_hdr(&mut self) -> *mut nlmsghdr {
@@ -336,8 +326,8 @@ impl Message {
             return None;
         }
         unsafe {
-            let duration = Duration::from_secs(be64_to_cpu((*self.timestamp).sec))
-                + Duration::from_micros(be64_to_cpu((*self.timestamp).usec));
+            let duration = Duration::from_secs(u64::from_be((*self.timestamp).sec))
+                + Duration::from_micros(u64::from_be((*self.timestamp).usec));
             Some(SystemTime::UNIX_EPOCH + duration)
         }
     }
@@ -349,7 +339,7 @@ impl Message {
             return None;
         }
         unsafe {
-            let len = be16_to_cpu((*self.hwaddr).hw_addrlen) as usize;
+            let len = u16::from_be((*self.hwaddr).hw_addrlen) as usize;
             Some(&(*self.hwaddr).hw_addr[..len])
         }
     }
@@ -357,13 +347,13 @@ impl Message {
     /// Get the packet ID that netfilter uses to track the packet.
     #[inline]
     pub fn get_packet_id(&self) -> u32 {
-        unsafe { be32_to_cpu((*self.hdr).packet_id) }
+        u32::from_be(unsafe { (*self.hdr).packet_id })
     }
 
     /// Get the link layer protocol number, e.g. the EtherType field on Ethernet links.
     #[inline]
     pub fn get_hw_protocol(&self) -> u16 {
-        be16_to_cpu(unsafe { (*self.hdr).hw_protocol })
+        u16::from_be(unsafe { (*self.hdr).hw_protocol })
     }
 
     /// Get the netfilter hook number that handles this packet.
@@ -550,7 +540,7 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
 
     let mut message = Message {
         buffer: Arc::clone(&queue.buffer),
-        id: be16_to_cpu((*nfgenmsg).res_id),
+        id: u16::from_be((*nfgenmsg).res_id),
         hdr: std::ptr::null(),
         nfmark: 0,
         nfmark_dirty: false,
@@ -790,7 +780,7 @@ impl Queue {
             let mut nlmsg = Nlmsg::new(&mut buf);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_CONFIG as u16, queue_num, true);
             let params = nfqnl_msg_config_params {
-                copy_range: be32_to_cpu(range as u32),
+                copy_range: (range as u32).to_be(),
                 copy_mode: if range == 0 {
                     NFQNL_COPY_META
                 } else {
@@ -944,13 +934,14 @@ impl Queue {
             let mut nlmsg = Nlmsg::new(&mut buffer[..]);
             nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, msg.id, false);
             let vh = nfqnl_msg_verdict_hdr {
-                verdict: be32_to_cpu(match msg.verdict {
+                verdict: (match msg.verdict {
                     Verdict::Drop => 0,
                     Verdict::Accept => 1,
                     Verdict::Queue(num) => (num as u32) << 16 | 3,
                     Verdict::Repeat => 4,
                     Verdict::Stop => 5,
-                }),
+                })
+                .to_be(),
                 id: (*msg.hdr).packet_id,
             };
             nlmsg.put_slice(NFQA_VERDICT_HDR as u16, std::slice::from_ref(&vh));
