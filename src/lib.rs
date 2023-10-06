@@ -194,7 +194,6 @@ enum PayloadState {
 }
 
 /// A network packet with associated metadata.
-#[derive(Debug)]
 pub struct Message {
     // This is here for lifetime requirements, but we're not using it directly.
     #[allow(dead_code)]
@@ -220,6 +219,32 @@ pub struct Message {
     payload: &'static mut [u8],
     payload_state: PayloadState,
     verdict: Verdict,
+}
+
+impl core::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Message")
+            .field("queue_num", &self.get_queue_num())
+            .field("nfmark", &self.get_nfmark())
+            .field("indev", &self.get_indev())
+            .field("outdev", &self.get_outdev())
+            .field("physindev", &self.get_physindev())
+            .field("physoutdev", &self.get_physoutdev())
+            .field("original_len", &self.get_original_len())
+            .field("skbinfo", &self.skbinfo)
+            .field("secctx", &self.get_security_context())
+            .field("uid", &self.get_uid())
+            .field("gid", &self.get_gid())
+            .field("timestamp", &self.get_timestamp())
+            .field("hwaddr", &self.get_hw_addr())
+            .field("packet_id", &self.get_packet_id())
+            .field("hw_protocol", &self.get_hw_protocol())
+            .field("hook", &self.get_hook())
+            .field("ct", &self.ct)
+            .field("payload", &self.get_payload())
+            .field("verdict", &self.get_verdict())
+            .finish()
+    }
 }
 
 unsafe impl Send for Message {}
