@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 #[allow(non_camel_case_types)]
 type be16 = u16;
@@ -69,6 +69,7 @@ pub struct NfqNlMsgConfigParams {
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy, Zeroable, Pod)]
 pub struct NfqNlMsgPacketHdr {
     pub packet_id: be32,
     pub hw_protocol: be16,
@@ -76,6 +77,7 @@ pub struct NfqNlMsgPacketHdr {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
 pub struct NfqNlMsgPacketHw {
     pub hw_addrlen: be16,
     pub padding: [u8; 2],
@@ -83,6 +85,7 @@ pub struct NfqNlMsgPacketHw {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
 pub struct NfqNlMsgPacketTimestamp {
     pub sec: be64,
     pub usec: be64,
@@ -152,5 +155,38 @@ impl NlmsgMut {
         let len = self.0.len();
         self.as_header_mut().len = len as u32;
         self.0
+    }
+}
+
+pub struct AttrStream<T>(T);
+
+impl<T> AttrStream<T> {
+    pub fn new(buf: T) -> Self {
+        Self(buf)
+    }
+}
+
+impl Iterator for AttrStream<BytesMut> {
+    type Item = (u16, BytesMut);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.remaining() < core::mem::size_of::<NlAttr>() {
+            return None;
+        }
+
+        let mut attr = NlAttr::zeroed();
+        self.0.copy_to_slice(bytemuck::bytes_of_mut(&mut attr));
+
+        let bytes = self
+            .0
+            .split_to(attr.len as usize - core::mem::size_of::<NlAttr>());
+
+        // Skip padding for the next attribute
+        let padding = (attr.len as usize).wrapping_neg() % 4;
+        if self.0.remaining() >= padding {
+            self.0.advance(padding);
+        }
+
+        Some((attr.ty, bytes))
     }
 }

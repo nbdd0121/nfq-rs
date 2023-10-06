@@ -28,14 +28,15 @@
 
 mod nlmsg;
 
-use bytes::BytesMut;
+use bytemuck::Zeroable;
+use bytes::{Buf, Bytes, BytesMut};
 use libc::{
-    bind, c_int, c_uint, close, nlattr, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl,
-    socket, sysconf, AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC,
-    NETLINK_NETFILTER, NETLINK_NO_ENOBUFS, NFNETLINK_V0, NFNL_SUBSYS_QUEUE, NFQA_CAP_LEN,
-    NFQA_CFG_CMD, NFQA_CFG_FLAGS, NFQA_CFG_F_CONNTRACK, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_GSO,
-    NFQA_CFG_F_SECCTX, NFQA_CFG_F_UID_GID, NFQA_CFG_MASK, NFQA_CFG_PARAMS, NFQA_CFG_QUEUE_MAXLEN,
-    NFQA_CT, NFQA_CT_INFO, NFQA_GID, NFQA_HWADDR, NFQA_IFINDEX_INDEV, NFQA_IFINDEX_OUTDEV,
+    bind, c_int, close, nlmsgerr, nlmsghdr, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf,
+    AF_NETLINK, AF_UNSPEC, EINTR, ENOSPC, MSG_DONTWAIT, MSG_TRUNC, NETLINK_NETFILTER,
+    NETLINK_NO_ENOBUFS, NFNETLINK_V0, NFNL_SUBSYS_QUEUE, NFQA_CAP_LEN, NFQA_CFG_CMD,
+    NFQA_CFG_FLAGS, NFQA_CFG_F_CONNTRACK, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_GSO, NFQA_CFG_F_SECCTX,
+    NFQA_CFG_F_UID_GID, NFQA_CFG_MASK, NFQA_CFG_PARAMS, NFQA_CFG_QUEUE_MAXLEN, NFQA_CT,
+    NFQA_CT_INFO, NFQA_GID, NFQA_HWADDR, NFQA_IFINDEX_INDEV, NFQA_IFINDEX_OUTDEV,
     NFQA_IFINDEX_PHYSINDEV, NFQA_IFINDEX_PHYSOUTDEV, NFQA_MARK, NFQA_PACKET_HDR, NFQA_PAYLOAD,
     NFQA_SECCTX, NFQA_SKB_CSUMNOTREADY, NFQA_SKB_GSO, NFQA_SKB_INFO, NFQA_TIMESTAMP, NFQA_UID,
     NFQA_VERDICT_HDR, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, NFQNL_COPY_META, NFQNL_COPY_PACKET,
@@ -43,14 +44,13 @@ use libc::{
     NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
 use nlmsg::{
-    NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlmsgMut, CTA_ID,
-    IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY, IP_CT_RELATED,
+    NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgHdr, NlmsgMut,
+    CTA_ID, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY, IP_CT_RELATED,
     IP_CT_RELATED_REPLY,
 };
 use std::collections::VecDeque;
 use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 const NLMSG_HDRLEN: usize = nfq_align(std::mem::size_of::<nlmsghdr>());
@@ -85,60 +85,6 @@ fn nfq_hdr_put(nlmsg: &mut NlmsgMut, typ: u16, queue_num: u16, ack: bool) {
     nfg.res_id = queue_num.to_be();
 }
 
-/// Helper functions for parsing `nlattr`. We do this ourselves instead of using libmnl to avoid
-/// unnecessary function calls.
-mod nla {
-    #[inline]
-    pub unsafe fn get_type(attr: *const libc::nlattr) -> u16 {
-        (*attr).nla_type & (libc::NLA_TYPE_MASK as u16)
-    }
-    #[inline]
-    pub unsafe fn get_payload_len(attr: *const libc::nlattr) -> usize {
-        (*attr).nla_len as usize - std::mem::size_of::<libc::nlattr>()
-    }
-    /// Returned value is only 32-bit aligned.
-    #[inline]
-    pub unsafe fn get_payload<T>(attr: *const libc::nlattr) -> *const T {
-        (attr as usize + std::mem::size_of::<libc::nlattr>()) as _
-    }
-    /// Get u32 from payload and convert it to native endian
-    #[inline]
-    pub unsafe fn get_u32(attr: *const libc::nlattr) -> u32 {
-        u32::from_be(*get_payload(attr))
-    }
-}
-
-struct AttrStream<'a> {
-    buf: &'a [u32],
-}
-
-impl<'a> Iterator for AttrStream<'a> {
-    type Item = *const nlattr;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let buf_left = self.buf.len() * 4;
-
-        // Not enough space for an attribute header
-        if buf_left < std::mem::size_of::<libc::nlattr>() {
-            return None;
-        }
-
-        let attr = self.buf.as_ptr() as *const nlattr;
-        let nla_len = unsafe { (*attr).nla_len } as usize;
-
-        // Make sure there are enough space for the entire attribute
-        assert!(
-            buf_left >= nla_len,
-            "truncated attribute {} < {}",
-            buf_left,
-            nla_len
-        );
-
-        self.buf = &self.buf[(nla_len + 3) / 4..];
-        Some(attr)
-    }
-}
-
 #[derive(Debug)]
 enum PayloadState {
     Unmodified,
@@ -148,9 +94,6 @@ enum PayloadState {
 
 /// A network packet with associated metadata.
 pub struct Message {
-    // This is here for lifetime requirements, but we're not using it directly.
-    #[allow(dead_code)]
-    buffer: Arc<Vec<u32>>,
     id: u16,
     nfmark: u32,
     nfmark_dirty: bool,
@@ -160,16 +103,15 @@ pub struct Message {
     physoutdev: u32,
     orig_len: u32,
     skbinfo: i32,
-    secctx: *const libc::c_char,
+    secctx: Option<Bytes>,
     uid: Option<u32>,
     gid: Option<u32>,
-    timestamp: *const NfqNlMsgPacketTimestamp,
-    hwaddr: *const NfqNlMsgPacketHw,
-    hdr: *const NfqNlMsgPacketHdr,
+    timestamp: Option<Bytes>,
+    hwaddr: Option<Bytes>, //NfqNlMsgPacketHw,
+    hdr: NfqNlMsgPacketHdr,
     // conntrack data
     ct: Option<Conntrack>,
-    // The actual lifetime is 'buffer
-    payload: &'static mut [u8],
+    payload: BytesMut,
     payload_state: PayloadState,
     verdict: Verdict,
 }
@@ -280,10 +222,13 @@ impl Message {
     /// Get the security context string of the local process sending the packet. If not applicable,
     /// `None` is returned.
     pub fn get_security_context(&self) -> Option<&str> {
-        if self.secctx.is_null() {
-            return None;
+        match &self.secctx {
+            None => None,
+            Some(secctx) => std::ffi::CStr::from_bytes_until_nul(&secctx)
+                .ok()?
+                .to_str()
+                .ok(),
         }
-        unsafe { std::ffi::CStr::from_ptr(self.secctx).to_str().ok() }
     }
 
     /// Get the UID of the local process sending the packet. If not applicable, `None` is returned.
@@ -300,50 +245,53 @@ impl Message {
 
     /// Get the timestamp of the packet.
     pub fn get_timestamp(&self) -> Option<SystemTime> {
-        if self.timestamp.is_null() {
-            return None;
+        match &self.timestamp {
+            None => None,
+            Some(bytes) => {
+                let timestamp: NfqNlMsgPacketTimestamp = bytemuck::pod_read_unaligned(&bytes);
+                let duration = Duration::from_secs(u64::from_be(timestamp.sec))
+                    + Duration::from_micros(u64::from_be(timestamp.usec));
+                Some(SystemTime::UNIX_EPOCH + duration)
+            }
         }
-        let timestamp = unsafe { self.timestamp.read_unaligned() };
-        let duration = Duration::from_secs(u64::from_be(timestamp.sec))
-            + Duration::from_micros(u64::from_be(timestamp.usec));
-        Some(SystemTime::UNIX_EPOCH + duration)
     }
 
     /// Get the hardware address associated with the packet. For Ethernet packets, the hardware
     /// address returned will be the MAC address of the packet source host, if any.
     pub fn get_hw_addr(&self) -> Option<&[u8]> {
-        if self.hwaddr.is_null() {
-            return None;
-        }
-        unsafe {
-            let len = u16::from_be((*self.hwaddr).hw_addrlen) as usize;
-            Some(&(*self.hwaddr).hw_addr[..len])
+        match &self.hwaddr {
+            None => None,
+            Some(bytes) => {
+                let hwaddr: &NfqNlMsgPacketHw =
+                    bytemuck::from_bytes(&bytes[..std::mem::size_of::<NfqNlMsgPacketHw>()]);
+                Some(&hwaddr.hw_addr[..u16::from_be(hwaddr.hw_addrlen) as usize])
+            }
         }
     }
 
     /// Get the packet ID that netfilter uses to track the packet.
     #[inline]
     pub fn get_packet_id(&self) -> u32 {
-        u32::from_be(unsafe { (*self.hdr).packet_id })
+        u32::from_be(self.hdr.packet_id)
     }
 
     /// Get the link layer protocol number, e.g. the EtherType field on Ethernet links.
     #[inline]
     pub fn get_hw_protocol(&self) -> u16 {
-        u16::from_be(unsafe { (*self.hdr).hw_protocol })
+        u16::from_be(self.hdr.hw_protocol)
     }
 
     /// Get the netfilter hook number that handles this packet.
     #[inline]
     pub fn get_hook(&self) -> u8 {
-        unsafe { (*self.hdr).hook }
+        self.hdr.hook
     }
 
     /// Get the content of the payload.
     #[inline]
     pub fn get_payload(&self) -> &[u8] {
         match self.payload_state {
-            PayloadState::Unmodified | PayloadState::Modified => self.payload,
+            PayloadState::Unmodified | PayloadState::Modified => &self.payload,
             PayloadState::Owned(ref vec) => &vec,
         }
     }
@@ -358,9 +306,9 @@ impl Message {
         match self.payload_state {
             PayloadState::Unmodified => {
                 self.payload_state = PayloadState::Modified;
-                self.payload
+                &mut self.payload
             }
-            PayloadState::Modified => self.payload,
+            PayloadState::Modified => &mut self.payload,
             PayloadState::Owned(ref mut vec) => vec,
         }
     }
@@ -438,85 +386,65 @@ impl Conntrack {
     }
 }
 
-unsafe fn parse_ct_attr(attr: *const nlattr, ct: &mut Conntrack) {
-    let typ = nla::get_type(attr) as c_uint;
+fn parse_ct_attr(ty: u16, mut buf: BytesMut, ct: &mut Conntrack) {
+    let typ = (ty & libc::NLA_TYPE_MASK as u16) as u32;
     // There are many more types, they just aren't handled yet.
     #[allow(clippy::single_match)]
     match typ {
-        CTA_ID => ct.id = nla::get_u32(attr),
+        CTA_ID => ct.id = buf.get_u32(),
         _ => (),
     }
 }
 
-unsafe fn parse_attr(attr: *const nlattr, message: &mut Message) {
-    let typ = nla::get_type(attr) as c_int;
+fn parse_attr(ty: u16, mut buf: BytesMut, message: &mut Message) {
+    let typ = (ty & libc::NLA_TYPE_MASK as u16) as c_int;
     match typ {
-        NFQA_MARK => message.nfmark = nla::get_u32(attr),
-        NFQA_IFINDEX_INDEV => message.indev = nla::get_u32(attr),
-        NFQA_IFINDEX_OUTDEV => message.outdev = nla::get_u32(attr),
-        NFQA_IFINDEX_PHYSINDEV => message.physindev = nla::get_u32(attr),
-        NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = nla::get_u32(attr),
-        NFQA_HWADDR => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketHw>());
-            message.hwaddr = nla::get_payload(attr);
-        }
-        NFQA_CAP_LEN => message.orig_len = nla::get_u32(attr),
-        NFQA_SKB_INFO => message.skbinfo = nla::get_u32(attr) as i32,
-        NFQA_SECCTX => message.secctx = nla::get_payload(attr),
-        NFQA_UID => message.uid = Some(nla::get_u32(attr)),
-        NFQA_GID => message.gid = Some(nla::get_u32(attr)),
-        NFQA_TIMESTAMP => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketTimestamp>());
-            message.timestamp = nla::get_payload(attr);
-        }
+        NFQA_MARK => message.nfmark = buf.get_u32(),
+        NFQA_IFINDEX_INDEV => message.indev = buf.get_u32(),
+        NFQA_IFINDEX_OUTDEV => message.outdev = buf.get_u32(),
+        NFQA_IFINDEX_PHYSINDEV => message.physindev = buf.get_u32(),
+        NFQA_IFINDEX_PHYSOUTDEV => message.physoutdev = buf.get_u32(),
+        NFQA_HWADDR => message.hwaddr = Some(buf.freeze()),
+        NFQA_CAP_LEN => message.orig_len = buf.get_u32(),
+        NFQA_SKB_INFO => message.skbinfo = buf.get_u32() as i32,
+        NFQA_SECCTX => message.secctx = Some(buf.freeze()),
+        NFQA_UID => message.uid = Some(buf.get_u32()),
+        NFQA_GID => message.gid = Some(buf.get_u32()),
+        NFQA_TIMESTAMP => message.timestamp = Some(buf.freeze()),
         NFQA_PACKET_HDR => {
-            assert!(nla::get_payload_len(attr) >= std::mem::size_of::<NfqNlMsgPacketHdr>());
-            message.hdr = nla::get_payload(attr);
+            message.hdr = *bytemuck::from_bytes(&buf[..core::mem::size_of::<NfqNlMsgPacketHdr>()])
         }
-        NFQA_PAYLOAD => {
-            let len = nla::get_payload_len(attr);
-            // We actually own this message (even though the buffer is shared via a Arc, we know
-            // that no other messages are overlapping, so it's safe to mutate it)
-            let payload = nla::get_payload::<u8>(attr) as *mut u8;
-            message.payload =
-                std::slice::from_raw_parts_mut(payload as *const u8 as *mut u8, len as usize);
-        }
+        NFQA_PAYLOAD => message.payload = buf,
         NFQA_CT => {
             // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
             // init should be good enough.
             if message.ct.is_none() {
-                message.ct = Some(std::mem::zeroed())
+                message.ct = Some(unsafe { std::mem::zeroed() })
             }
             let ct = message.ct.as_mut().unwrap();
-            for attr in (AttrStream {
-                buf: std::slice::from_raw_parts(
-                    nla::get_payload(attr),
-                    (nla::get_payload_len(attr) + 3) / 4,
-                ),
-            }) {
-                parse_ct_attr(attr, ct);
+            for (ty, buf) in nlmsg::AttrStream::new(buf) {
+                parse_ct_attr(ty, buf, ct);
             }
         }
         NFQA_CT_INFO => {
             if message.ct.is_none() {
-                message.ct = Some(std::mem::zeroed())
+                message.ct = Some(unsafe { std::mem::zeroed() })
             }
-            message.ct.as_mut().unwrap().state = nla::get_u32(attr);
+            message.ct.as_mut().unwrap().state = buf.get_u32();
         }
         _ => (),
     }
 }
 
-unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
-    const NFGEN_HDRLEN: usize = nfq_align(std::mem::size_of::<NfGenMsg>());
-    let nfgenmsg = (nlh as usize + NLMSG_HDRLEN) as *const NfGenMsg;
-    let attr_start = (nfgenmsg as usize + NFGEN_HDRLEN) as *const u32;
-    let attr_len = (*nlh).nlmsg_len as usize - NLMSG_HDRLEN - NFGEN_HDRLEN;
+fn parse_msg(mut bytes: BytesMut, queue: &mut Queue) {
+    bytes.advance(core::mem::size_of::<NlMsgHdr>());
+
+    let nfgenmsg: NfGenMsg = *bytemuck::from_bytes(&bytes[..core::mem::size_of::<NfGenMsg>()]);
+    bytes.advance(core::mem::size_of::<NfGenMsg>());
 
     let mut message = Message {
-        buffer: Arc::clone(&queue.buffer),
-        id: u16::from_be((*nfgenmsg).res_id),
-        hdr: std::ptr::null(),
+        id: u16::from_be(nfgenmsg.res_id),
+        hdr: Zeroable::zeroed(),
         nfmark: 0,
         nfmark_dirty: false,
         indev: 0,
@@ -527,22 +455,18 @@ unsafe fn parse_msg(nlh: *const nlmsghdr, queue: &mut Queue) {
         skbinfo: 0,
         uid: None,
         gid: None,
-        secctx: std::ptr::null(),
-        timestamp: std::ptr::null(),
-        hwaddr: std::ptr::null(),
+        secctx: None,
+        timestamp: None,
+        hwaddr: None,
         ct: None,
-        payload: &mut [],
+        payload: BytesMut::new(),
         payload_state: PayloadState::Unmodified,
         verdict: Verdict::Accept,
     };
 
-    for attr in (AttrStream {
-        buf: std::slice::from_raw_parts(attr_start, (attr_len + 3) / 4),
-    }) {
-        parse_attr(attr, &mut message);
+    for (ty, buf) in nlmsg::AttrStream::new(bytes) {
+        parse_attr(ty, buf, &mut message);
     }
-
-    assert!(!message.hdr.is_null());
 
     queue.queue.push_back(message);
 }
@@ -555,11 +479,7 @@ pub struct Queue {
     /// message from the kernel.
     recv_flag: libc::c_int,
     bufsize: usize,
-    /// In order to support out-of-order verdict and batch recv, we need to carefully manage the
-    /// lifetime of buffer, so that buffer is never freed before all messages are dropped.
-    /// We use Arc for this case, and keep an extra copy here, so that if all messages are handled
-    /// before call to `recv`, we can re-use the buffer.
-    buffer: Arc<Vec<u32>>,
+
     /// We can receive multiple messages from kernel in a single recv, so we keep a queue
     /// internally before everything is consumed.
     queue: VecDeque<Message>,
@@ -582,7 +502,6 @@ impl Queue {
             fd,
             recv_flag: 0,
             bufsize: metadata_size,
-            buffer: Arc::new(Vec::with_capacity(metadata_size)),
             queue: VecDeque::new(),
             verdict_buffer: BytesMut::with_capacity(metadata_size + 65536),
         };
@@ -767,8 +686,7 @@ impl Queue {
         // This value corresponds to kernel's NLMSG_GOODSIZE or libmnl's MNL_SOCKET_BUFFER_SIZE
         let metadata_size = std::cmp::min(unsafe { sysconf(_SC_PAGE_SIZE) as usize }, 8192);
 
-        self.bufsize = (metadata_size + range as usize + 3) / 4;
-        self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
+        self.bufsize = metadata_size + range as usize;
         Ok(())
     }
 
@@ -805,22 +723,18 @@ impl Queue {
 
     // Receive an nlmsg, using callback to process them. If Ok(true) is returned it means we got an
     // ACK.
-    fn recv_nlmsg(&mut self, mut callback: impl FnMut(&mut Self, *const nlmsghdr)) -> Result<bool> {
-        let buf = match Arc::get_mut(&mut self.buffer) {
-            Some(v) => v,
-            None => {
-                self.buffer = Arc::new(Vec::with_capacity(self.bufsize));
-                Arc::get_mut(&mut self.buffer).unwrap()
-            }
-        };
-        let buf_size = buf.capacity();
-        unsafe { buf.set_len(buf_size) }
+    fn recv_nlmsg(&mut self, mut callback: impl FnMut(&mut Self, BytesMut)) -> Result<bool> {
+        let mut buf = BytesMut::with_capacity(self.bufsize + 3);
+        let align_offset = (buf.as_ptr() as usize).wrapping_neg() % 4;
+        if align_offset != 0 {
+            buf = buf.split_off(align_offset);
+        }
 
         let size = unsafe {
             recv(
                 self.fd,
                 buf.as_mut_ptr() as _,
-                buf_size * 4,
+                buf.capacity(),
                 self.recv_flag | MSG_TRUNC,
             )
         };
@@ -829,30 +743,35 @@ impl Queue {
         }
 
         // As we pass in MSG_TRUNC, if we receive a larger size it means the message is trucated
-        let mut size = size as usize;
-        if size > buf_size * 4 {
+        let size = size as usize;
+        if size > buf.capacity() {
             return Err(std::io::Error::from_raw_os_error(ENOSPC));
         }
 
-        let mut nlh = buf.as_ptr() as *const nlmsghdr;
-        loop {
-            if size < NLMSG_HDRLEN {
-                break;
-            }
-            let nlmsg_len = unsafe { (*nlh).nlmsg_len } as usize;
-            if size < nlmsg_len {
+        unsafe { buf.set_len(size) };
+
+        while buf.len() > core::mem::size_of::<NlMsgHdr>() {
+            let nlh: NlMsgHdr = *bytemuck::from_bytes(&buf[..core::mem::size_of::<NlMsgHdr>()]);
+
+            // Sanity check
+            let len = nlh.len as usize;
+            if size < len {
                 break;
             }
 
-            if unsafe { (*nlh).nlmsg_flags } & NLM_F_DUMP_INTR as u16 != 0 {
+            let aligned_len = nfq_align(len);
+            let mut msg_buf = buf.split_to(core::cmp::min(aligned_len, buf.len()));
+            msg_buf.truncate(len);
+
+            if nlh.flags & NLM_F_DUMP_INTR as u16 != 0 {
                 return Err(std::io::Error::from_raw_os_error(EINTR));
             }
 
-            let nlmsg_type = unsafe { (*nlh).nlmsg_type } as c_int;
+            let nlmsg_type = nlh.ty as c_int;
             match nlmsg_type {
                 NLMSG_ERROR => {
-                    assert!(nlmsg_len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
-                    let err = (nlh as usize + NLMSG_HDRLEN) as *const nlmsgerr;
+                    assert!(len >= NLMSG_HDRLEN + std::mem::size_of::<nlmsgerr>());
+                    let err = (msg_buf.as_ptr() as usize + NLMSG_HDRLEN) as *const nlmsgerr;
                     let errno = unsafe { (*err).error }.abs();
                     if errno == 0 {
                         return Ok(true);
@@ -861,14 +780,7 @@ impl Queue {
                 }
                 NLMSG_DONE => return Ok(true),
                 v if v < NLMSG_MIN_TYPE => (),
-                _ => callback(self, nlh),
-            }
-
-            let aligned_len = nfq_align(nlmsg_len);
-            nlh = (nlh as usize + aligned_len) as *const nlmsghdr;
-            size = match size.checked_sub(aligned_len) {
-                Some(v) => v,
-                None => break,
+                _ => callback(self, msg_buf),
             }
         }
 
@@ -886,8 +798,8 @@ impl Queue {
     pub fn recv(&mut self) -> Result<Message> {
         // We have processed all messages in previous recv batch, do next iteration
         while self.queue.is_empty() {
-            self.recv_nlmsg(|this, nlh| {
-                unsafe { parse_msg(nlh, this) };
+            self.recv_nlmsg(|this, buf| {
+                parse_msg(buf, this);
             })?;
         }
 
@@ -909,7 +821,7 @@ impl Queue {
                 Verdict::Stop => 5,
             })
             .to_be(),
-            id: unsafe { (*msg.hdr).packet_id },
+            id: msg.hdr.packet_id,
         };
         nlmsg.put(NFQA_VERDICT_HDR as u16, &vh);
         if msg.nfmark_dirty {
