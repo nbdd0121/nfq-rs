@@ -8,7 +8,6 @@ description = "Rust library for dealing with NetFilter queue"
 keywords = ["netfilter", "nfqueue", "iptables"]
 homepage = "https://github.com/nbdd0121/nfq-rs"
 repository = "https://github.com/nbdd0121/nfq-rs.git"
-rust-version = "1.73.0"
 
 [dependencies]
 libc = "0.2"
