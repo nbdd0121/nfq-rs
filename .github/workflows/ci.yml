@@ -1,6 +1,13 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -8,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v3
+    - name: Prepare
+      run: curl --proto '=https' --tlsv1.3 https://sh.rustup.rs -sSf | sh -s -- -y
     - name: Build
       run: cargo build --verbose
     - name: Run tests
