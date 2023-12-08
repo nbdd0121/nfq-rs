@@ -121,6 +121,28 @@ impl NlmsgMut {
         Self::new(buf)
     }
 
+    pub fn nested(ty: u16) -> Self {
+        const NLA_F_NESTED: u16 = 1 << 15;
+
+        // 12 => sizeof(ty) + sizeof(nested_attr_ty) + sizeof(nest_attr_data_u32)
+        let mut buffer = Self(BytesMut::with_capacity(12));
+
+        // len of NlAttr will be updated by finish_nested
+        buffer.0.put_slice(bytemuck::bytes_of(&NlAttr {
+            len: 0,
+            ty: ty | NLA_F_NESTED,
+        }));
+        buffer
+    }
+
+    pub fn finish_nested(&mut self, parent: &mut NlmsgMut) {
+        let len = self.0.len();
+        let header: &mut NlAttr =
+            bytemuck::from_bytes_mut(&mut self.0[..core::mem::size_of::<NlAttr>()]);
+        header.len = len as u16;
+        parent.0.put_slice(self.0.as_ref());
+    }
+
     /// Allocate and zero for an extra header
     pub fn extra_header<T: NoUninit + AnyBitPattern>(&mut self) -> &mut T {
         assert!(core::mem::size_of::<T>() % 4 == 0);

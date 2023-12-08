@@ -847,12 +847,9 @@ impl Queue {
 
         if let Some(ref conntrack) = msg.ct {
             if conntrack.mark_dirty {
-                let mut nested_nlmsg = NlmsgMut::with_capacity(1024);
+                let mut nested_nlmsg = NlmsgMut::nested(NFQA_CT as u16);
                 nested_nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
-                let conntrack_buffer = nested_nlmsg.finish();
-
-                // Create a nested conntrack nlmsg within the main nlmsg
-                nlmsg.put_bytes(NFQA_CT as u16, &conntrack_buffer);
+                nested_nlmsg.finish_nested(&mut nlmsg);
             }
         }
 
