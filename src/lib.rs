@@ -40,8 +40,8 @@ use libc::{
     NFQA_MARK, NFQA_PACKET_HDR, NFQA_PAYLOAD, NFQA_SECCTX, NFQA_SKB_CSUMNOTREADY, NFQA_SKB_GSO,
     NFQA_SKB_INFO, NFQA_TIMESTAMP, NFQA_UID, NFQA_VERDICT_HDR, NFQNL_CFG_CMD_BIND,
     NFQNL_CFG_CMD_UNBIND, NFQNL_COPY_META, NFQNL_COPY_PACKET, NFQNL_MSG_CONFIG, NFQNL_MSG_VERDICT,
-    NFT_CT_MARK, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR,
-    NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK,
+    SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
 use std::collections::VecDeque;
 use std::io::Result;
@@ -847,9 +847,15 @@ impl Queue {
 
         if let Some(ref conntrack) = msg.ct {
             if conntrack.mark_dirty {
-                nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
+                let mut nested_nlmsg = NlmsgMut::with_capacity(1024);
+                nested_nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
+                let conntrack_buffer = nested_nlmsg.finish();
+
+                // Create a nested conntrack nlmsg within the main nlmsg
+                nlmsg.put_bytes(NFQA_CT as u16, &conntrack_buffer);
             }
         }
+
         if let PayloadState::Unmodified = msg.payload_state {
         } else {
             if msg.verdict != Verdict::Drop {
