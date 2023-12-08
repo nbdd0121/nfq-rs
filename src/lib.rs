@@ -40,8 +40,8 @@ use libc::{
     NFQA_MARK, NFQA_PACKET_HDR, NFQA_PAYLOAD, NFQA_SECCTX, NFQA_SKB_CSUMNOTREADY, NFQA_SKB_GSO,
     NFQA_SKB_INFO, NFQA_TIMESTAMP, NFQA_UID, NFQA_VERDICT_HDR, NFQNL_CFG_CMD_BIND,
     NFQNL_CFG_CMD_UNBIND, NFQNL_COPY_META, NFQNL_COPY_PACKET, NFQNL_MSG_CONFIG, NFQNL_MSG_VERDICT,
-    NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR, NLM_F_REQUEST, PF_NETLINK,
-    SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
+    NFT_CT_MARK, NLMSG_DONE, NLMSG_ERROR, NLMSG_MIN_TYPE, NLM_F_ACK, NLM_F_DUMP_INTR,
+    NLM_F_REQUEST, PF_NETLINK, SOCK_RAW, SOL_NETLINK, _SC_PAGE_SIZE,
 };
 use std::collections::VecDeque;
 use std::io::Result;
@@ -50,8 +50,8 @@ use std::time::{Duration, SystemTime};
 
 use nlmsg::{
     NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgErr, NlMsgHdr,
-    NlmsgMut, CTA_ID, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY,
-    IP_CT_RELATED, IP_CT_RELATED_REPLY,
+    NlmsgMut, CTA_ID, CTA_MARK, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW,
+    IP_CT_NEW_REPLY, IP_CT_RELATED, IP_CT_RELATED_REPLY,
 };
 
 /// Decision made on a specific packet.
@@ -329,6 +329,13 @@ impl Message {
     pub fn get_conntrack(&self) -> Option<&Conntrack> {
         self.ct.as_ref()
     }
+
+    /// Get mutable conntrack information.
+    #[inline]
+    #[cfg_attr(not(feature = "ct"), doc(hidden))]
+    pub fn get_conntrack_mut(&mut self) -> Option<&mut Conntrack> {
+        self.ct.as_mut()
+    }
 }
 
 /// Conntrack information associated with the message
@@ -336,6 +343,8 @@ impl Message {
 #[derive(Debug)]
 pub struct Conntrack {
     state: u32,
+    mark: u32,
+    mark_dirty: bool,
     id: u32,
 }
 
@@ -375,14 +384,25 @@ impl Conntrack {
             _ => State::Invalid,
         }
     }
+
+    #[inline]
+    pub fn get_mark(&self) -> u32 {
+        self.mark
+    }
+
+    #[inline]
+    pub fn set_mark(&mut self, mark: u32) {
+        self.mark = mark;
+        self.mark_dirty = true;
+    }
 }
 
 fn parse_ct_attr(ty: u16, mut buf: BytesMut, ct: &mut Conntrack) {
     let typ = (ty & libc::NLA_TYPE_MASK as u16) as u32;
     // There are many more types, they just aren't handled yet.
-    #[allow(clippy::single_match)]
     match typ {
         CTA_ID => ct.id = buf.get_u32(),
+        CTA_MARK => ct.mark = buf.get_u32(),
         _ => (),
     }
 }
@@ -641,7 +661,7 @@ impl Queue {
         self.recv_error()
     }
 
-    /// Set whether we should receive connteack information along with packets.
+    /// Set whether we should receive conntrack information along with packets.
     #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
@@ -824,6 +844,12 @@ impl Queue {
         if msg.nfmark_dirty {
             nlmsg.put_be32(NFQA_MARK as u16, msg.nfmark);
         }
+
+        if let Some(ref conntrack) = msg.ct {
+            if conntrack.mark_dirty {
+                nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
+            }
+        }
         if let PayloadState::Unmodified = msg.payload_state {
         } else {
             if msg.verdict != Verdict::Drop {
@@ -831,6 +857,7 @@ impl Queue {
                 nlmsg.put_bytes(NFQA_PAYLOAD as u16, payload);
             }
         }
+
         let buffer = nlmsg.finish();
         let ret = self.send_nlmsg(&buffer);
         self.verdict_buffer = buffer;

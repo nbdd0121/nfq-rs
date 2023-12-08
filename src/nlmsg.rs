@@ -19,6 +19,7 @@ pub const IP_CT_RELATED_REPLY: u32 = 4;
 pub const IP_CT_NUMBER: u32 = 5;
 pub const IP_CT_NEW_REPLY: u32 = 5;
 
+pub const CTA_MARK: u32 = 8;
 pub const CTA_ID: u32 = 12;
 
 #[repr(C)]
