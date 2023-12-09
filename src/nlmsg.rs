@@ -19,8 +19,35 @@ pub const IP_CT_RELATED_REPLY: u32 = 4;
 pub const IP_CT_NUMBER: u32 = 5;
 pub const IP_CT_NEW_REPLY: u32 = 5;
 
+pub const CTA_UNSPEC: u32 = 0;
+pub const CTA_TUPLE_ORIG: u32 = 1;
+pub const CTA_TUPLE_REPLY: u32 = 2;
+pub const CTA_STATUS: u32 = 3;
+pub const CTA_PROTOINFO: u32 = 4;
+pub const CTA_HELP: u32 = 5;
+pub const CTA_NAT_SRC: u32 = 6;
+pub const CTA_TIMEOUT: u32 = 7;
 pub const CTA_MARK: u32 = 8;
+pub const CTA_COUNTERS_ORIG: u32 = 9;
+pub const CTA_COUNTERS_REPLY: u32 = 10;
+pub const CTA_USE: u32 = 11;
 pub const CTA_ID: u32 = 12;
+pub const CTA_NAT_DST: u32 = 13;
+pub const CTA_TUPLE_MASTER: u32 = 14;
+pub const CTA_SEQ_ADJ_ORIG: u32 = 15;
+pub const CTA_NAT_SEQ_ADJ_ORIG: u32 = CTA_SEQ_ADJ_ORIG;
+pub const CTA_SEQ_ADJ_REPLY: u32 = 17;
+pub const CTA_NAT_SEQ_ADJ_REPLY: u32 = CTA_SEQ_ADJ_REPLY;
+pub const CTA_SECMARK: u32 = 19; // obsolete
+pub const CTA_ZONE: u32 = 20;
+pub const CTA_SECCTX: u32 = 21;
+pub const CTA_TIMESTAMP: u32 = 22;
+pub const CTA_MARK_MASK: u32 = 23;
+pub const CTA_LABELS: u32 = 24;
+pub const CTA_LABELS_MASK: u32 = 25;
+pub const CTA_SYNPROXY: u32 = 26;
+pub const CTA_FILTER: u32 = 27;
+pub const CTA_STATUS_MASK: u32 = 28;
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
@@ -122,15 +149,13 @@ impl NlmsgMut {
     }
 
     pub fn nested(ty: u16) -> Self {
-        const NLA_F_NESTED: u16 = 1 << 15;
-
-        // 12 => sizeof(ty) + sizeof(nested_attr_ty) + sizeof(nest_attr_data_u32)
+        // 12 => sizeof(ty) + sizeof(nested_attr_ty) + sizeof(nested_attr_data_u32)
         let mut buffer = Self(BytesMut::with_capacity(12));
 
         // len of NlAttr will be updated by finish_nested
         buffer.0.put_slice(bytemuck::bytes_of(&NlAttr {
             len: 0,
-            ty: ty | NLA_F_NESTED,
+            ty: ty | libc::NLA_F_NESTED as u16,
         }));
         buffer
     }
