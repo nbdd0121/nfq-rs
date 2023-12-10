@@ -849,7 +849,7 @@ impl Queue {
             if conntrack.mark_dirty {
                 let mut nested_nlmsg = nlmsg.nested(NFQA_CT as u16);
                 nested_nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
-                nlmsg.finish_nested(&mut nested_nlmsg);
+                nlmsg.finish_nested(nested_nlmsg);
             }
         }
 

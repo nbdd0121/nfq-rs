@@ -160,7 +160,7 @@ impl NlmsgMut {
         Self(nested_buffer)
     }
 
-    pub fn finish_nested(&mut self, nested: &mut NlmsgMut) {
+    pub fn finish_nested(&mut self, mut nested: NlmsgMut) {
         let len = nested.0.len();
         let header: &mut NlAttr =
             bytemuck::from_bytes_mut(&mut nested.0[..core::mem::size_of::<NlAttr>()]);
