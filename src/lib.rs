@@ -641,7 +641,7 @@ impl Queue {
         self.recv_error()
     }
 
-    /// Set whether we should receive connteack information along with packets.
+    /// Set whether we should receive conntrack information along with packets.
     #[cfg_attr(not(feature = "ct"), doc(hidden))]
     pub fn set_recv_conntrack(&mut self, queue_num: u16, enabled: bool) -> Result<()> {
         let mut nlmsg = nlmsg::NlmsgMut::with_capacity(metadata_size());
