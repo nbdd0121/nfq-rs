@@ -850,6 +850,18 @@ impl AsFd for Queue {
     }
 }
 
+impl FromRawFd for Queue {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Queue {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            recv_flag: 0,
+            bufsize: metadata_size(),
+            queue: VecDeque::new(),
+            verdict_buffer: BytesMut::with_capacity(metadata_size() + 65536),
+        }
+    }
+}
+
 fn _assert_send_and_sync() {
     fn check<T: Send + Sync>() {}
 
