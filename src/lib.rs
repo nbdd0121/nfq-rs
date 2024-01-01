@@ -50,8 +50,8 @@ use std::time::{Duration, SystemTime};
 
 use nlmsg::{
     NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgErr, NlMsgHdr,
-    NlmsgMut, CTA_ID, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW, IP_CT_NEW_REPLY,
-    IP_CT_RELATED, IP_CT_RELATED_REPLY,
+    NlmsgMut, CTA_ID, CTA_MARK, IP_CT_ESTABLISHED, IP_CT_ESTABLISHED_REPLY, IP_CT_NEW,
+    IP_CT_NEW_REPLY, IP_CT_RELATED, IP_CT_RELATED_REPLY,
 };
 
 /// Decision made on a specific packet.
@@ -329,6 +329,13 @@ impl Message {
     pub fn get_conntrack(&self) -> Option<&Conntrack> {
         self.ct.as_ref()
     }
+
+    /// Get mutable conntrack information.
+    #[inline]
+    #[cfg_attr(not(feature = "ct"), doc(hidden))]
+    pub fn get_conntrack_mut(&mut self) -> Option<&mut Conntrack> {
+        self.ct.as_mut()
+    }
 }
 
 /// Conntrack information associated with the message
@@ -336,6 +343,8 @@ impl Message {
 #[derive(Debug)]
 pub struct Conntrack {
     state: u32,
+    mark: u32,
+    mark_dirty: bool,
     id: u32,
 }
 
@@ -375,14 +384,25 @@ impl Conntrack {
             _ => State::Invalid,
         }
     }
+
+    #[inline]
+    pub fn get_mark(&self) -> u32 {
+        self.mark
+    }
+
+    #[inline]
+    pub fn set_mark(&mut self, mark: u32) {
+        self.mark = mark;
+        self.mark_dirty = true;
+    }
 }
 
 fn parse_ct_attr(ty: u16, mut buf: BytesMut, ct: &mut Conntrack) {
     let typ = (ty & libc::NLA_TYPE_MASK as u16) as u32;
     // There are many more types, they just aren't handled yet.
-    #[allow(clippy::single_match)]
     match typ {
         CTA_ID => ct.id = buf.get_u32(),
+        CTA_MARK => ct.mark = buf.get_u32(),
         _ => (),
     }
 }
@@ -824,6 +844,15 @@ impl Queue {
         if msg.nfmark_dirty {
             nlmsg.put_be32(NFQA_MARK as u16, msg.nfmark);
         }
+
+        if let Some(ref conntrack) = msg.ct {
+            if conntrack.mark_dirty {
+                let mut nested_nlmsg = nlmsg.nested(NFQA_CT as u16);
+                nested_nlmsg.put_be32(CTA_MARK as u16, conntrack.mark);
+                nlmsg.finish_nested(nested_nlmsg);
+            }
+        }
+
         if let PayloadState::Unmodified = msg.payload_state {
         } else {
             if msg.verdict != Verdict::Drop {
@@ -831,6 +860,7 @@ impl Queue {
                 nlmsg.put_bytes(NFQA_PAYLOAD as u16, payload);
             }
         }
+
         let buffer = nlmsg.finish();
         let ret = self.send_nlmsg(&buffer);
         self.verdict_buffer = buffer;
