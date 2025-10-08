@@ -28,7 +28,6 @@
 
 mod nlmsg;
 
-use bytemuck::Zeroable;
 use bytes::{Buf, Bytes, BytesMut};
 use libc::{
     bind, c_int, recv, sendto, setsockopt, sockaddr_nl, socket, sysconf, AF_NETLINK, AF_UNSPEC,
@@ -47,6 +46,7 @@ use std::collections::VecDeque;
 use std::io::Result;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, SystemTime};
+use zerocopy::{FromBytes, FromZeros};
 
 use nlmsg::{
     NfGenMsg, NfqNlMsgPacketHdr, NfqNlMsgPacketHw, NfqNlMsgPacketTimestamp, NlMsgErr, NlMsgHdr,
@@ -239,7 +239,7 @@ impl Message {
         match &self.timestamp {
             None => None,
             Some(bytes) => {
-                let timestamp: NfqNlMsgPacketTimestamp = bytemuck::pod_read_unaligned(&bytes);
+                let timestamp = NfqNlMsgPacketTimestamp::read_from_bytes(&bytes).unwrap();
                 let duration = Duration::from_secs(u64::from_be(timestamp.sec))
                     + Duration::from_micros(u64::from_be(timestamp.usec));
                 Some(SystemTime::UNIX_EPOCH + duration)
@@ -253,8 +253,7 @@ impl Message {
         match &self.hwaddr {
             None => None,
             Some(bytes) => {
-                let hwaddr: &NfqNlMsgPacketHw =
-                    bytemuck::from_bytes(&bytes[..std::mem::size_of::<NfqNlMsgPacketHw>()]);
+                let hwaddr = NfqNlMsgPacketHw::ref_from_prefix(&bytes).unwrap().0;
                 Some(&hwaddr.hw_addr[..u16::from_be(hwaddr.hw_addrlen) as usize])
             }
         }
@@ -403,7 +402,7 @@ fn parse_attr(ty: u16, mut buf: BytesMut, message: &mut Message) {
         NFQA_GID => message.gid = Some(buf.get_u32()),
         NFQA_TIMESTAMP => message.timestamp = Some(buf.freeze()),
         NFQA_PACKET_HDR => {
-            message.hdr = *bytemuck::from_bytes(&buf[..core::mem::size_of::<NfqNlMsgPacketHdr>()])
+            message.hdr = *NfqNlMsgPacketHdr::ref_from_prefix(&buf).unwrap().0;
         }
         NFQA_PAYLOAD => message.payload = buf,
         NFQA_CT => {
@@ -430,12 +429,12 @@ fn parse_attr(ty: u16, mut buf: BytesMut, message: &mut Message) {
 fn parse_msg(mut bytes: BytesMut, queue: &mut Queue) {
     bytes.advance(core::mem::size_of::<NlMsgHdr>());
 
-    let nfgenmsg: NfGenMsg = *bytemuck::from_bytes(&bytes[..core::mem::size_of::<NfGenMsg>()]);
+    let nfgenmsg = *NfGenMsg::ref_from_prefix(&bytes).unwrap().0;
     bytes.advance(core::mem::size_of::<NfGenMsg>());
 
     let mut message = Message {
         id: u16::from_be(nfgenmsg.res_id),
-        hdr: Zeroable::zeroed(),
+        hdr: NfqNlMsgPacketHdr::new_zeroed(),
         nfmark: 0,
         nfmark_dirty: false,
         indev: 0,
@@ -746,7 +745,7 @@ impl Queue {
         unsafe { buf.set_len(size) };
 
         while buf.len() > core::mem::size_of::<NlMsgHdr>() {
-            let nlh: NlMsgHdr = *bytemuck::from_bytes(&buf[..core::mem::size_of::<NlMsgHdr>()]);
+            let nlh = *NlMsgHdr::ref_from_prefix(&buf).unwrap().0;
 
             // Sanity check
             let len = nlh.len as usize;
@@ -765,10 +764,10 @@ impl Queue {
             let nlmsg_type = nlh.ty as c_int;
             match nlmsg_type {
                 NLMSG_ERROR => {
-                    let err: &NlMsgErr = bytemuck::from_bytes(
-                        &msg_buf[core::mem::size_of::<NlMsgHdr>()..]
-                            [..core::mem::size_of::<NlMsgErr>()],
-                    );
+                    let err: &NlMsgErr =
+                        NlMsgErr::ref_from_prefix(&msg_buf[core::mem::size_of::<NlMsgHdr>()..])
+                            .unwrap()
+                            .0;
                     let errno = err.error.abs();
                     if errno == 0 {
                         return Ok(true);

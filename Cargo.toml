@@ -13,7 +13,7 @@ rust-version = "1.73.0"
 [dependencies]
 libc = "0.2"
 bytes = "1.5"
-bytemuck = { version = "1.14", features = ["derive"] }
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [features]
 ct = []

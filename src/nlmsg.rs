@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use bytes::{Buf, BufMut, BytesMut};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
 #[allow(non_camel_case_types)]
 type be16 = u16;
@@ -22,7 +22,7 @@ pub const IP_CT_NEW_REPLY: u32 = 5;
 pub const CTA_ID: u32 = 12;
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NlMsgHdr {
     pub len: u32,
     pub ty: u16,
@@ -32,21 +32,21 @@ pub struct NlMsgHdr {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NlMsgErr {
     pub error: core::ffi::c_int,
     pub msg: NlMsgHdr,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NlAttr {
     pub len: u16,
     pub ty: u16,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfGenMsg {
     pub family: u8,
     pub version: u8,
@@ -54,7 +54,7 @@ pub struct NfGenMsg {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgConfigCmd {
     pub command: u8,
     pub padding: u8,
@@ -62,21 +62,21 @@ pub struct NfqNlMsgConfigCmd {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgVerdictHdr {
     pub verdict: be32,
     pub id: be32,
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgConfigParams {
     pub copy_range: be32,
     pub copy_mode: u8,
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgPacketHdr {
     pub packet_id: be32,
     pub hw_protocol: be16,
@@ -84,7 +84,7 @@ pub struct NfqNlMsgPacketHdr {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgPacketHw {
     pub hw_addrlen: be16,
     pub padding: [u8; 2],
@@ -92,7 +92,7 @@ pub struct NfqNlMsgPacketHw {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NfqNlMsgPacketTimestamp {
     pub sec: be64,
     pub usec: be64,
@@ -121,13 +121,14 @@ impl NlmsgMut {
     }
 
     /// Allocate and zero for an extra header
-    pub fn extra_header<T: NoUninit + AnyBitPattern>(&mut self) -> &mut T {
+    pub fn extra_header<T: FromBytes + IntoBytes + KnownLayout>(&mut self) -> &mut T {
         assert!(core::mem::size_of::<T>() % 4 == 0);
 
         let offset = self.0.len();
         let len = core::mem::size_of::<T>();
         self.0.put_bytes(0, len);
-        bytemuck::from_bytes_mut(&mut self.0[offset..])
+
+        T::mut_from_bytes(&mut self.0[offset..]).unwrap()
     }
 
     /// Put a slice of arbitary data.
@@ -137,16 +138,15 @@ impl NlmsgMut {
             .try_into()
             .unwrap();
 
-        self.0
-            .put_slice(bytemuck::bytes_of(&NlAttr { len: total_len, ty }));
+        self.0.put_slice(NlAttr { len: total_len, ty }.as_bytes());
         self.0.put_slice(data);
         // Insert padding
         self.0.put_bytes(0, data_len - data.len());
     }
 
     /// Put an arbitrary data.
-    pub fn put<T: NoUninit>(&mut self, ty: u16, data: &T) {
-        self.put_bytes(ty, bytemuck::bytes_of(data))
+    pub fn put<T: IntoBytes + Immutable>(&mut self, ty: u16, data: &T) {
+        self.put_bytes(ty, data.as_bytes())
     }
 
     /// Put an u32 attribute, convert to big endian
@@ -155,7 +155,7 @@ impl NlmsgMut {
     }
 
     pub fn as_header_mut(&mut self) -> &mut NlMsgHdr {
-        bytemuck::from_bytes_mut(&mut self.0[..core::mem::size_of::<NlMsgHdr>()])
+        NlMsgHdr::mut_from_prefix(&mut self.0).unwrap().0
     }
 
     pub fn finish(mut self) -> BytesMut {
@@ -181,8 +181,8 @@ impl Iterator for AttrStream<BytesMut> {
             return None;
         }
 
-        let mut attr = NlAttr::zeroed();
-        self.0.copy_to_slice(bytemuck::bytes_of_mut(&mut attr));
+        let mut attr = NlAttr::new_zeroed();
+        self.0.copy_to_slice(attr.as_mut_bytes());
 
         let bytes = self
             .0
