@@ -215,7 +215,7 @@ impl Message {
     pub fn get_security_context(&self) -> Option<&str> {
         match &self.secctx {
             None => None,
-            Some(secctx) => std::ffi::CStr::from_bytes_until_nul(&secctx)
+            Some(secctx) => std::ffi::CStr::from_bytes_until_nul(secctx)
                 .ok()?
                 .to_str()
                 .ok(),
@@ -239,7 +239,7 @@ impl Message {
         match &self.timestamp {
             None => None,
             Some(bytes) => {
-                let timestamp = NfqNlMsgPacketTimestamp::read_from_bytes(&bytes).unwrap();
+                let timestamp = NfqNlMsgPacketTimestamp::read_from_bytes(bytes).unwrap();
                 let duration = Duration::from_secs(u64::from_be(timestamp.sec))
                     + Duration::from_micros(u64::from_be(timestamp.usec));
                 Some(SystemTime::UNIX_EPOCH + duration)
@@ -253,7 +253,7 @@ impl Message {
         match &self.hwaddr {
             None => None,
             Some(bytes) => {
-                let hwaddr = NfqNlMsgPacketHw::ref_from_prefix(&bytes).unwrap().0;
+                let hwaddr = NfqNlMsgPacketHw::ref_from_prefix(bytes).unwrap().0;
                 Some(&hwaddr.hw_addr[..u16::from_be(hwaddr.hw_addrlen) as usize])
             }
         }
@@ -282,7 +282,7 @@ impl Message {
     pub fn get_payload(&self) -> &[u8] {
         match self.payload_state {
             PayloadState::Unmodified | PayloadState::Modified => &self.payload,
-            PayloadState::Owned(ref vec) => &vec,
+            PayloadState::Owned(ref vec) => vec,
         }
     }
 
@@ -332,7 +332,7 @@ impl Message {
 
 /// Conntrack information associated with the message
 #[cfg_attr(not(feature = "ct"), doc(hidden))]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Conntrack {
     state: u32,
     id: u32,
@@ -406,10 +406,8 @@ fn parse_attr(ty: u16, mut buf: BytesMut, message: &mut Message) {
         }
         NFQA_PAYLOAD => message.payload = buf,
         NFQA_CT => {
-            // I'm too lazy to expand things out manually - as Conntrack are all integers, zero
-            // init should be good enough.
             if message.ct.is_none() {
-                message.ct = Some(unsafe { std::mem::zeroed() })
+                message.ct = Some(Default::default());
             }
             let ct = message.ct.as_mut().unwrap();
             for (ty, buf) in nlmsg::AttrStream::new(buf) {
@@ -418,7 +416,7 @@ fn parse_attr(ty: u16, mut buf: BytesMut, message: &mut Message) {
         }
         NFQA_CT_INFO => {
             if message.ct.is_none() {
-                message.ct = Some(unsafe { std::mem::zeroed() })
+                message.ct = Some(Default::default());
             }
             message.ct.as_mut().unwrap().state = buf.get_u32();
         }
