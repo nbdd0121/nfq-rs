@@ -13,6 +13,7 @@ rust-version = "1.85.0"
 [dependencies]
 libc = "0.2"
 bytes = "1.5"
+rustix = { version = "1", features = [ "param", "net" ] }
 zerocopy = { version = "0.8", features = ["derive"] }
 
 [features]
