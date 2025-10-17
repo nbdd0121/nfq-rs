@@ -2,13 +2,13 @@
 name = "nfq"
 version = "0.2.6"
 authors = ["Gary Guo <gary@garyguo.net>"]
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Rust library for dealing with NetFilter queue"
 keywords = ["netfilter", "nfqueue", "iptables"]
 homepage = "https://github.com/nbdd0121/nfq-rs"
 repository = "https://github.com/nbdd0121/nfq-rs.git"
-rust-version = "1.73.0"
+rust-version = "1.85.0"
 
 [dependencies]
 libc = "0.2"
