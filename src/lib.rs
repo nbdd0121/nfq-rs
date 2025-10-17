@@ -823,6 +823,25 @@ impl AsFd for Queue {
     }
 }
 
+impl From<Queue> for OwnedFd {
+    fn from(q: Queue) -> OwnedFd {
+        q.fd
+    }
+}
+
+impl From<OwnedFd> for Queue {
+    fn from(fd: OwnedFd) -> Queue {
+        let metadata_size = *METADATA_SIZE;
+        Queue {
+            fd,
+            recv_flag: RecvFlags::empty(),
+            bufsize: metadata_size,
+            queue: VecDeque::new(),
+            verdict_buffer: BytesMut::with_capacity(metadata_size + 65536),
+        }
+    }
+}
+
 fn _assert_send_and_sync() {
     fn check<T: Send + Sync>() {}
 
