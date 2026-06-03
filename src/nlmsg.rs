@@ -133,15 +133,16 @@ impl NlmsgMut {
 
     /// Put a slice of arbitary data.
     pub fn put_bytes(&mut self, ty: u16, data: &[u8]) {
-        let data_len = data.len().next_multiple_of(4);
+        let data_len = data.len();
         let total_len: u16 = (data_len + core::mem::size_of::<NlAttr>())
             .try_into()
             .unwrap();
 
         self.0.put_slice(NlAttr { len: total_len, ty }.as_bytes());
         self.0.put_slice(data);
-        // Insert padding
-        self.0.put_bytes(0, data_len - data.len());
+        // The padding is not counted by NlAttr
+        let padding_len = data_len.next_multiple_of(4) - data_len;
+        self.0.put_bytes(0, padding_len);
     }
 
     /// Put an arbitrary data.
