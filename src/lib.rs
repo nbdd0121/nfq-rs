@@ -779,6 +779,11 @@ impl Queue {
 
     /// Verdict a message.
     pub fn verdict(&mut self, msg: Message) -> Result<()> {
+        self.try_verdict(&msg)
+    }
+
+    /// Verdict a message (without consuming it).
+    pub fn try_verdict(&mut self, msg: &Message) -> Result<()> {
         let buffer = core::mem::take(&mut self.verdict_buffer);
         let mut nlmsg = NlmsgMut::new(buffer);
         nfq_hdr_put(&mut nlmsg, NFQNL_MSG_VERDICT as u16, msg.id, false);
