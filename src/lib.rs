@@ -660,6 +660,20 @@ impl Queue {
         Ok(())
     }
 
+    /// Size the receive buffer for a copy range that is already configured on the socket, without
+    /// sending anything to the kernel.
+    ///
+    /// A `Queue` made [from an `OwnedFd`](#impl-From%3COwnedFd%3E-for-Queue) does not know the
+    /// copy range of the queues bound on that socket, and receives with a buffer that only fits
+    /// packet metadata: [`recv`](#method.recv) fails with `ENOSPC` on any packet that does not fit.
+    /// [`set_copy_range`](#method.set_copy_range) would fix the buffer, but it configures the
+    /// kernel first, which needs `CAP_NET_ADMIN`. A process that was handed the socket precisely
+    /// so that it can read packets without that capability calls this instead, with the range the
+    /// socket's owner configured ([`bind`](#method.bind) sets 65535).
+    pub fn assume_copy_range(&mut self, range: u16) {
+        self.bufsize = *METADATA_SIZE + range as usize;
+    }
+
     /// Set the maximum kernel queue length. If the application cannot [`recv`](#method.recv) fast
     /// enough, newly queued packet will be dropped (or accepted if fail open is enabled).
     pub fn set_queue_max_len(&mut self, queue_num: u16, len: u32) -> Result<()> {
@@ -829,6 +843,11 @@ impl From<Queue> for OwnedFd {
     }
 }
 
+/// Wrap a netfilter netlink socket that was opened elsewhere, for example by another process.
+///
+/// The queue assumes that only metadata is copied. If a copy range is configured on the socket,
+/// say so with [`assume_copy_range`](Queue::assume_copy_range), or call
+/// [`set_copy_range`](Queue::set_copy_range) to configure it anew.
 impl From<OwnedFd> for Queue {
     fn from(fd: OwnedFd) -> Queue {
         let metadata_size = *METADATA_SIZE;
